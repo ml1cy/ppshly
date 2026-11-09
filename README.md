@@ -1,31 +1,96 @@
-![ppsholy](https://user-images.githubusercontent.com/100136502/214304334-ea6e3d1e-29aa-4f42-85f9-583e76ce4296.png)
-# PPSHoly is a unblocked games site made for the PPS school district with tons of games. To try the site go to https://ppsholy.vercel.app/
+![PPSHoly](assets/brand/wordmark-on-white.png)
 
-## Links
-- https://ppsholy.github.io/ (Blocked on PPS net)
-- https://ppsholy.vercel.app/ (Blocked on PPS net)
-- https://ppsholy.netlify.app/
-- More coming soon
-## How to deploy this site for free
-**Deploy to github pages:**
-1. Go to https://github.com/ppsholy/ppsholy.github.io/fork
-2. Click "Create Fork"
-3. Then go to the settings of the Repo you made
-4. Select the "Pages" option
-5. Then under "Branch" where it says "None" click on it then select "Main"
-6. Click the "Save" button
-7. Now at the top of the page there will be an option to "Visit site", If you dont see the button wait 5 minutes and refresh the page
-8. If you have any questions or need more help setting up open an issue at https://github.com/ppsholy/ppsholy/issues
-7. If this helped please give us a star on github. ⭐
+# PPSHoly
 
-**Other methods:**
+Browser games for Portage. A plain static site: no build step, no framework, no third-party scripts.
+PPSHoly is not affiliated with Portage Public Schools.
 
-[![Deploy to Vercel](https://binbashbanana.github.io/deploy-buttons/buttons/official/vercel.svg)](https://vercel.com/new/clone?repository-url=https://github.com/ppsholy/ppsholy.github.io)
+## What is where
 
-[![Deploy to Netlify](https://binbashbanana.github.io/deploy-buttons/buttons/official/netlify.svg)](https://app.netlify.com/start/deploy?repository=https://github.com/ppsholy/ppsholy.github.io)
+| Path | What it is |
+| --- | --- |
+| `index.html`, `css/style.css`, `js/app.js` | The home page: search, filters, recently played, light and dark theme |
+| `js/games.js` | The game list. Add a game by adding one line |
+| `play/` | The games themselves, one folder each |
+| `icons/` | Game thumbnails (square, about 250px) |
+| `assets/brand/`, `assets/fonts/` | Logo files and the two brand fonts, hosted with the site |
+| `wrangler.jsonc`, `worker/`, `scripts/`, `.assetsignore`, `_headers` | Cloudflare deployment only |
 
-[![Deploy to Koyeb](https://binbashbanana.github.io/deploy-buttons/buttons/official/koyeb.svg)](https://app.koyeb.com/deploy?type=git&repositoryhttps://github.com/ppsholy/ppsholy.github.io&branch=main&name=deploy-buttons)
+To preview locally, serve the folder with any static server:
 
-[![Deploy to Render](https://binbashbanana.github.io/deploy-buttons/buttons/official/render.svg)](https://render.com/deploy?repo=https://github.com/ppsholy/ppsholy.github.io)
+```bash
+python3 -m http.server 8000
+```
 
-[![Deploy to Cyclic](https://binbashbanana.github.io/deploy-buttons/buttons/official/cyclic.svg)](https://app.cyclic.sh/api/app/deploy/ppsholy/ppsholy.github.io)
+## Add a game
+
+1. Put the game in `play/your-game/` with an `index.html`.
+2. Put a square thumbnail in `icons/`.
+3. Add a line to `js/games.js`:
+
+```js
+{"t": "Your Game", "u": "play/your-game/", "i": "icons/your-game.webp", "g": ["two"]},
+```
+
+`g` is optional and takes `pop`, `two`, `stream` or `bad`. A game with a missing thumbnail gets the P mark automatically.
+
+## Deploy to GitHub Pages
+
+1. In the repo, open **Settings → Pages**.
+2. Under **Build and deployment**, pick **Deploy from a branch**, choose `main` and `/ (root)`, and save.
+3. After a few minutes the site is live at `https://<user>.github.io/<repo>/`.
+
+Every path in the site is relative, so it works under the `/<repo>/` prefix with no changes. The `.nojekyll` file tells GitHub to publish the files as they are.
+
+GitHub asks that Pages sites stay under 1 GB, and this one is about 2.6 GB because of the games. It publishes today, but GitHub may ask you to slim it down.
+
+## Deploy to Cloudflare
+
+Cloudflare will not host a static file over 25 MiB, and 23 game files (about 845 MB in total) are bigger than that. So the deploy has two parts:
+
+- Everything under 25 MiB is served as static assets from Cloudflare's CDN.
+- The 23 large files go in an R2 bucket. A small Worker (`worker/index.js`) serves them at their original URLs, so no game needs editing.
+
+One-time setup:
+
+1. Turn on R2 in the Cloudflare dashboard (it asks for a payment method, but the first 10 GB of storage is free).
+
+2. Sign in from the repo folder:
+
+```bash
+npx wrangler login
+```
+
+3. Create the bucket:
+
+```bash
+npx wrangler r2 bucket create ppsholy-big-files
+```
+
+4. Upload the large files (about 845 MB, so give it a while):
+
+```bash
+node scripts/big-files.mjs --upload
+```
+
+5. Deploy:
+
+```bash
+npx wrangler deploy
+```
+
+The site is then live at `https://ppsholy.<your-subdomain>.workers.dev`. To use your own domain, open the Worker in the dashboard and add it under **Settings → Domains & Routes**.
+
+To redeploy on every push, open **Workers & Pages → ppsholy → Settings → Builds**, connect this GitHub repo, and leave the deploy command as `npx wrangler deploy`.
+
+When you add a game with a file over 25 MiB, run step 4 again and commit the updated `.assetsignore`. The deploy stops with "Asset too large" if you forget.
+
+## Docker
+
+```bash
+docker build -t ppsholy -f dockerfile . && docker run -p 8080:80 ppsholy
+```
+
+## Brand
+
+Colours, type and logo rules come from the PPSHoly brand guide: red `#C60000`, blue `#3929EA`, yellow `#DEE340`, ink `#0D0B21`, paper `#F6F5EE`; Barlow Condensed ExtraBold Italic for headings and Barlow for text (both under the SIL Open Font License). Shapes lean 16 degrees, stripes are 7 parts on and 5 off, and corners stay square.

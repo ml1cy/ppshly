@@ -1,0 +1,16 @@
+{
+  // Cloudflare Workers config. Deploy with: npx wrangler deploy
+  "name": "ppsholy",
+  "compatibility_date": "2026-11-01",
+  "main": "worker/index.js",
+  "assets": {
+    // The whole repo is the site. .assetsignore lists what is left out.
+    "directory": ".",
+    "binding": "ASSETS"
+  },
+  // Files over Cloudflare's 25 MiB static-asset limit live in this R2 bucket.
+  // Fill it with: node scripts/big-files.mjs --upload
+  "r2_buckets": [
+    { "binding": "BIG_FILES", "bucket_name": "ppsholy-big-files" }
+  ]
+}
