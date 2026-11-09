@@ -1,0 +1,2115 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="color-scheme" content="dark">
+<title>Trunk Line — Arkai</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #16321f; overflow: hidden; }
+  body { -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+  canvas { display: block; width: 100vw; height: 100vh; height: 100dvh; touch-action: none; outline: none; cursor: pointer; }
+  canvas:focus-visible { outline: 2px solid rgba(154, 230, 76, 0.5); outline-offset: -2px; }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  #controls:focus-within { position: fixed; left: 8px; right: 8px; bottom: 8px; width: auto; height: auto; clip: auto; white-space: normal; display: flex; flex-wrap: wrap; gap: 6px; padding: 8px; border-radius: 12px; background: #101c10; border: 1px solid #24391f; }
+  #controls button, #controls a { min-height: 44px; box-sizing: border-box; display: inline-flex; align-items: center; text-decoration: none; padding: 0 12px; border-radius: 10px; border: 1px solid #24391f; background: #172717; color: #eaffe4; font: 600 16px system-ui, sans-serif; }
+  #controls a[hidden] { display: none; }
+  #controls button:focus, #controls a:focus { outline: 2px solid #9ae64c; }
+  #copybox { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(4, 10, 4, 0.82); }
+  #copybox.open { display: flex; }
+  #copybox .card { width: min(92vw, 420px); box-sizing: border-box; padding: 18px; border-radius: 16px; background: #16281b; border: 1px solid #24391f; color: #eaffe4; }
+  #copybox p { margin: 0 0 10px; font-size: 16px; line-height: 1.4; }
+  #copybox textarea { width: 100%; height: 100px; box-sizing: border-box; padding: 10px; border-radius: 10px; border: 1px solid #24391f; background: #10231a; color: #cdf5b8; font: 16px/1.45 ui-monospace, Menlo, Consolas, monospace; resize: none; -webkit-user-select: text; user-select: text; }
+  #copybox button { margin-top: 12px; width: 100%; height: 48px; border: 0; border-radius: 10px; background: #9ae64c; color: #0e1c06; font-weight: 700; font-size: 17px; cursor: pointer; }
+</style>
+</head>
+<body>
+<canvas id="game" tabindex="0" role="application" aria-label="Trunk Line, a daily network deduction puzzle. Five stations are connected by a hidden wiring tree. Ping any two stations to learn only how many hops separate them, never the path. A ping that answers 1 hop has found a direct line and marks it for you. Mark the four true lines, then check. Letters Q, W, E, D and F select stations A through E; arrow keys move a cursor between stations and Enter selects it. M switches between ping and mark, K checks, X clears your marks, I shows a hint, R replays a solved puzzle for practice, L describes the network, H shows the rules. Comma and period open the previous or next day. Press Tab for buttons."></canvas>
+<div id="status" class="sr" aria-live="polite"></div>
+<div id="controls" class="sr" role="group" aria-label="Game controls">
+  <button type="button" data-act="station0">Select station A</button>
+  <button type="button" data-act="station1">Select station B</button>
+  <button type="button" data-act="station2">Select station C</button>
+  <button type="button" data-act="station3">Select station D</button>
+  <button type="button" data-act="station4">Select station E</button>
+  <button type="button" data-act="mode">Switch between ping and mark</button>
+  <button type="button" data-act="hint">Hint</button>
+  <button type="button" data-act="check">Check your marks</button>
+  <button type="button" data-act="clear">Clear your marks</button>
+  <button type="button" data-act="board">Describe the network</button>
+  <button type="button" data-act="help">Rules</button>
+  <button type="button" data-act="replay">Replay a solved puzzle for practice</button>
+  <button type="button" data-act="next">Next puzzle</button>
+  <button type="button" data-act="share">Share result</button>
+  <a id="onward" href="#" target="_top" hidden>Play the next daily puzzle</a>
+  <button type="button" data-act="card0">Line 1</button>
+  <button type="button" data-act="card1">Line 2</button>
+  <button type="button" data-act="card2">Line 3</button>
+  <button type="button" data-act="mute">Sound on or off</button>
+  <button type="button" data-act="home">Title screen</button>
+  <button type="button" data-act="prevday">Previous day</button>
+  <button type="button" data-act="nextday">Next day</button>
+</div>
+<div id="copybox" role="dialog" aria-modal="true" aria-labelledby="copytitle">
+  <div class="card">
+    <p id="copytitle">Your browser would not copy by itself. Select the text below, copy it, and paste it anywhere.</p>
+    <textarea id="copytext" readonly></textarea>
+    <button id="copyclose" type="button">Done</button>
+  </div>
+</div>
+<script>
+(() => {
+  'use strict';
+
+  // ---- puzzle core begin ----
+  // Everything between the two markers is pure: no DOM, no clock, no storage,
+  // no audio. The one promise a daily puzzle makes is that network #N hides
+  // the same wiring for everyone, forever. A change here that renumbers or
+  // reshapes old days breaks every result anyone has already shared.
+
+  const GAME_SEED = 0x7a17;
+  const EPOCH_UTC = Date.UTC(2026, 8, 21);
+  const DAY_MS = 86400000;
+  const FREEZE_COOLDOWN = 30;
+
+  // n=5, fixed — not a difficulty knob. The offline simulation (IDEA-BACKLOG.md,
+  // 2026-09-21, sessions #249 and #254) proved a distance-oracle spanning-tree
+  // puzzle has a query floor of Θ(n) regardless of what is asked for, and that
+  // narrowing the win-condition (diameter, centroid) does not cut it — only
+  // shrinking n does. n=6 already averages 9.2 queries and n=8 averages 14.3,
+  // both above the ~8-10 budget Echo Sounding and Bearing shipped with; n=5
+  // averages 6.88 with a measured maximum of 8 across 3000 trials, and this
+  // build's own exhaustive check (trunk-line.test.mjs, all 5^3=125 labeled
+  // trees on 5 nodes, not a sample) confirms every one of them solves and caps
+  // the same way. Three independent daily puzzles reuse this one n, rather
+  // than faking an Easy/Medium/Hard spread that the mechanic cannot honestly
+  // support at any other size.
+  const N = 5;
+  const STATIONS = ['A', 'B', 'C', 'D', 'E'];
+  const TIERS = [
+    { name: 'I', label: 'Line 1' },
+    { name: 'II', label: 'Line 2' },
+    { name: 'III', label: 'Line 3' },
+  ];
+
+  // mulberry32 over an FNV-1a mix of the inputs: integer arithmetic only, so
+  // every engine draws the same puzzle from the same day.
+  function seeded(...parts) {
+    let h = 2166136261 >>> 0;
+    for (const part of parts) {
+      h = Math.imul(h ^ (part & 0xffff), 16777619) >>> 0;
+      h = Math.imul(h ^ (part >>> 16), 16777619) >>> 0;
+    }
+    let a = h | 0;
+    return () => {
+      a = (a + 0x6d2b79f5) | 0;
+      let t = a;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  // Every one of the C(5,2)=10 unordered station pairs, in a fixed enumeration
+  // order that doubles as the pair's own index — the unit a ping, a mark, and
+  // a saved history token are all recorded against. `pairIndexOf` is the
+  // inverse lookup, built once from the same table.
+  const PAIRS = [];
+  for (let a = 0; a < N; a++) for (let b = a + 1; b < N; b++) PAIRS.push([a, b]);
+  const PAIR_COUNT = PAIRS.length; // 10
+  const PAIR_INDEX = Array.from({ length: N }, () => new Array(N).fill(-1));
+  PAIRS.forEach(([a, b], i) => { PAIR_INDEX[a][b] = i; PAIR_INDEX[b][a] = i; });
+  const pairIndexOf = (a, b) => PAIR_INDEX[a][b];
+
+  /**
+   * A uniform-random labeled tree on N stations, via a random Prüfer sequence
+   * of length N-2. Cayley's formula makes every one of N^(N-2) labeled trees
+   * equally likely, and — unlike Bearing's compass placement or Echo
+   * Sounding's reflector layout — decoding a Prüfer sequence never fails, so
+   * there is no rejection loop or fallback board here to retry into.
+   */
+  function randomTreeEdges(rand) {
+    const seq = [];
+    for (let i = 0; i < N - 2; i++) seq.push(Math.floor(rand() * N));
+    const degree = new Array(N).fill(1);
+    for (const v of seq) degree[v]++;
+    const edges = [];
+    for (const v of seq) {
+      let leaf = -1;
+      for (let i = 0; i < N; i++) { if (degree[i] === 1) { leaf = i; break; } }
+      edges.push(leaf < v ? [leaf, v] : [v, leaf]);
+      degree[leaf]--; degree[v]--;
+    }
+    const remaining = [];
+    for (let i = 0; i < N; i++) if (degree[i] === 1) remaining.push(i);
+    edges.push(remaining[0] < remaining[1] ? remaining : [remaining[1], remaining[0]]);
+    return edges;
+  }
+
+  /** Every pairwise hop-distance on the hidden tree, by plain BFS from each station — N=5, trivial. */
+  function distMatrix(edges) {
+    const adj = Array.from({ length: N }, () => []);
+    for (const [a, b] of edges) { adj[a].push(b); adj[b].push(a); }
+    const dist = Array.from({ length: N }, () => new Array(N).fill(-1));
+    for (let s = 0; s < N; s++) {
+      dist[s][s] = 0;
+      const queue = [s];
+      while (queue.length) {
+        const u = queue.shift();
+        for (const v of adj[u]) if (dist[s][v] === -1) { dist[s][v] = dist[s][u] + 1; queue.push(v); }
+      }
+    }
+    return dist;
+  }
+
+  /**
+   * The reference solver (IDEA-BACKLOG.md, 2026-09-21, session #249's adaptive
+   * greedy reconstruction): ping station 0 against every other station first
+   * (N-1 pings, always), bucket every station by that distance-from-root, then
+   * for each station one level further out ping the previous level's stations
+   * until one comes back at distance 1 — that one is its parent on the hidden
+   * tree. `par` is exactly the query count this makes on *this* hidden tree,
+   * not a fixed number: a hub-shaped tree finishes in the mandatory first N-1
+   * pings, a long chain costs more, and it is the spread across all 125
+   * labeled trees on 5 nodes — verified exhaustively in trunk-line.test.mjs,
+   * not sampled — that keeps every day inside the ~8-10 budget Echo Sounding
+   * and Bearing both shipped with.
+   */
+  function solveTree(dist) {
+    let queries = N - 1;
+    const distFromRoot = [0];
+    for (let v = 1; v < N; v++) distFromRoot.push(dist[0][v]);
+    const byLevel = new Map();
+    for (let v = 1; v < N; v++) {
+      const d = distFromRoot[v];
+      if (!byLevel.has(d)) byLevel.set(d, []);
+      byLevel.get(d).push(v);
+    }
+    const edges = new Set();
+    for (const v of byLevel.get(1) || []) edges.add(pairIndexOf(0, v));
+    const maxLevel = Math.max(...distFromRoot);
+    for (let d = 2; d <= maxLevel; d++) {
+      const candidates = byLevel.get(d - 1) || [];
+      for (const v of byLevel.get(d) || []) {
+        let parent = -1;
+        for (const u of candidates) {
+          queries++;
+          if (dist[v][u] === 1) { parent = u; break; }
+        }
+        if (parent < 0) return { queries, ok: false, edges: null };
+        edges.add(pairIndexOf(v, parent));
+      }
+    }
+    return { queries, ok: true, edges };
+  }
+
+  // A straight chain: solveTree always succeeds on it (trunk-line.test.mjs
+  // checks all 125 trees, this one included), so it is a safe answer of last
+  // resort if a future edit to this file ever breaks that guarantee for some
+  // other tree — the same defensive shape as every other daily's fallback
+  // board, even though nothing in 125 exhaustively-checked trees needs it.
+  const FALLBACK_EDGES = [[0, 1], [1, 2], [2, 3], [3, 4]];
+
+  /** The puzzle for a day and tier: a hidden tree plus the par this exact tree costs the reference solver. */
+  function makePuzzle(day, tier) {
+    const rand = seeded(GAME_SEED, day, tier);
+    const edges = randomTreeEdges(rand);
+    const dist = distMatrix(edges);
+    const solved = solveTree(dist);
+    const finalEdges = solved.ok ? edges : FALLBACK_EDGES;
+    const finalDist = solved.ok ? dist : distMatrix(FALLBACK_EDGES);
+    const finalSolve = solved.ok ? solved : solveTree(finalDist);
+    return {
+      day, tier,
+      edges: finalEdges,
+      dist: finalDist,
+      hidden: new Set(finalEdges.map(([a, b]) => pairIndexOf(a, b))),
+      par: finalSolve.queries,
+    };
+  }
+
+  /** True only when the marks are exactly the hidden tree's edges — nothing else survives every ping. */
+  function judge(puzzle, marks) {
+    if (marks.length !== N - 1) return { ok: false, reason: 'count' };
+    return { ok: marks.every((m) => puzzle.hidden.has(m)) };
+  }
+
+  /** Every pinged pair's distance, from this run's ping history — later entries win, though a deterministic puzzle always agrees with itself. */
+  function pingedMap(p, pings) {
+    const map = new Map();
+    for (const idx of pings) {
+      const [a, b] = PAIRS[idx];
+      map.set(idx, p.dist[a][b]);
+    }
+    return map;
+  }
+
+  /**
+   * Live hint, level 2: what solveTree's own two-phase algorithm would still
+   * want to know next, computed purely from the pairs the player has
+   * themselves pinged so far (`known`: pair index -> revealed distance, e.g.
+   * from pingedMap). Mirrors solveTree's root fan-out then per-level parent
+   * search, but is order-independent — it never assumes the player queried
+   * in the reference algorithm's own order, only reads what is already
+   * known, so a station whose parent is already pinned down by *any* known
+   * distance-1 pair is treated as resolved even if that pair was not the
+   * "first" candidate the reference solver would itself have tried.
+   * Returns { type: 'pair', a, b } when a specific next ping is forced, or
+   * { type: 'phase', phase: 'parent' } once root fan-out is complete but no
+   * single next pair is forced by the player's own data — an honest generic
+   * nudge instead of a fabricated suggestion.
+   */
+  function nextHintPing(known) {
+    for (let v = 1; v < N; v++) {
+      if (!known.has(pairIndexOf(0, v))) return { type: 'pair', a: 0, b: v };
+    }
+    const distFromRoot = [0];
+    for (let v = 1; v < N; v++) distFromRoot.push(known.get(pairIndexOf(0, v)));
+    const byLevel = new Map();
+    for (let v = 1; v < N; v++) {
+      const d = distFromRoot[v];
+      if (!byLevel.has(d)) byLevel.set(d, []);
+      byLevel.get(d).push(v);
+    }
+    const maxLevel = Math.max(...distFromRoot);
+    for (let d = 2; d <= maxLevel; d++) {
+      const candidates = byLevel.get(d - 1) || [];
+      for (const v of byLevel.get(d) || []) {
+        if (candidates.some((u) => known.get(pairIndexOf(v, u)) === 1)) continue; // parent already pinned down
+        const next = candidates.find((u) => !known.has(pairIndexOf(v, u)));
+        if (next !== undefined) return { type: 'pair', a: Math.min(v, next), b: Math.max(v, next) };
+      }
+    }
+    return { type: 'phase', phase: 'parent' };
+  }
+
+  /**
+   * Live hint, level 3: an edge already forced by the player's own pings —
+   * never a lookup of the hidden answer. Two ways a pair becomes forced: (1)
+   * any pinged pair that came back distance 1 is a direct edge, always true
+   * on a tree, no further reasoning needed; (2) once every root ping is in,
+   * a station whose only remaining not-yet-ruled-out candidate at the level
+   * above it is a single station — that candidate must be its parent by
+   * elimination, even when that exact pair was never itself pinged. `marks`
+   * are excluded so a hint never just repeats what is already marked.
+   * Returns { pair: [a, b] } or null when nothing is forced yet.
+   */
+  function forcedEdgeHint(known, marks) {
+    for (const [idx, d] of known) {
+      if (d === 1 && !marks.has(idx)) return { pair: PAIRS[idx] };
+    }
+    for (let v = 1; v < N; v++) {
+      if (!known.has(pairIndexOf(0, v))) return null; // root fan-out incomplete: no elimination yet
+    }
+    const distFromRoot = [0];
+    for (let v = 1; v < N; v++) distFromRoot.push(known.get(pairIndexOf(0, v)));
+    const byLevel = new Map();
+    for (let v = 1; v < N; v++) {
+      const d = distFromRoot[v];
+      if (!byLevel.has(d)) byLevel.set(d, []);
+      byLevel.get(d).push(v);
+    }
+    const maxLevel = Math.max(...distFromRoot);
+    for (let d = 2; d <= maxLevel; d++) {
+      const candidates = byLevel.get(d - 1) || [];
+      for (const v of byLevel.get(d) || []) {
+        const remaining = candidates.filter((u) => {
+          const idx = pairIndexOf(v, u);
+          return !(known.has(idx) && known.get(idx) !== 1);
+        });
+        if (remaining.length === 1) {
+          const idx = pairIndexOf(v, remaining[0]);
+          if (!marks.has(idx)) return { pair: PAIRS[idx] };
+        }
+      }
+    }
+    return null;
+  }
+
+  // A history token is a pinged pair's index (0-9), or a failed check: a bare
+  // 'x'. Joined by dots, the same convention every other daily on this portal
+  // uses for its own move history.
+  const tokensOf = (text) => (typeof text === 'string' && text ? text.split('.') : []);
+  function costOf(text) {
+    return tokensOf(text).reduce((sum, token) => sum + (token[0] === 'x' ? 2 : 1), 0);
+  }
+
+  /** What a stored ping history put on screen. Stops at the first entry the game could not have written. */
+  function replay(text) {
+    const pings = [];
+    const kept = [];
+    for (const token of tokensOf(text)) {
+      const m = /^(x?)(\d{0,2})$/.exec(token);
+      if (!m || (!m[1] && !m[2])) break; // only a corrupt store gets here
+      if (m[2]) {
+        const idx = Number(m[2]);
+        if (idx >= PAIR_COUNT) break;
+        pings.push(idx);
+      }
+      kept.push(token);
+    }
+    return { pings, moves: costOf(kept.join('.')), inputs: kept.join('.') };
+  }
+
+  const marksOf = (text) => (typeof text === 'string' && text ? text.split('.').map(Number).filter((n) => Number.isInteger(n) && n >= 0 && n < PAIR_COUNT) : []);
+
+  const PUNCT_KEYS = { Comma: ',', Period: '.' };
+  const own = (table, name) => Object.prototype.hasOwnProperty.call(table, name);
+
+  // Stations are selected by physical key position (code), not by the typed
+  // character: Q/W/E/D/F sit in one left-hand cluster regardless of layout,
+  // the same reasoning bearing/echo-sounding apply to WASD for movement. R is
+  // skipped deliberately — it is already this portal's practice-replay key in
+  // every other daily, and that convention outranks a tidier Q-W-E-R-T run.
+  const STATION_CODES = { KeyQ: 0, KeyW: 1, KeyE: 2, KeyD: 3, KeyF: 4 };
+
+  function readKey(rawCode, rawKey) {
+    const code = String(rawCode || ''), key = String(rawKey || '');
+    const station = own(STATION_CODES, code) ? STATION_CODES[code] : -1;
+    const digit = /^Digit[123]$/.test(code) || (/^Numpad[123]$/.test(code) && /^[123]$/.test(key)) ? Number(code.slice(-1)) - 1 : -1;
+    let letter = key.length === 1 ? key.toLowerCase() : key;
+    if (/^[\p{L}\p{M}]+$/u.test(key) && /[^\p{Script=Latin}\p{Script=Inherited}\p{Script=Common}]/u.test(key)) {
+      if (/^Key[A-Z]$/.test(code)) letter = code.slice(3).toLowerCase();
+      else if (own(PUNCT_KEYS, code)) letter = PUNCT_KEYS[code];
+    }
+    return { station, digit, letter: station >= 0 || digit >= 0 ? '' : letter };
+  }
+
+  function dayStep(letter) {
+    if (letter === ',' || letter === '<' || letter === '[') return -1;
+    if (letter === '.' || letter === '>' || letter === ']') return 1;
+    return 0;
+  }
+
+  function dayNumber(date) {
+    const utc = Date.UTC(date.getFullYear(), date.getMonth(), date.getDate());
+    return Math.max(1, Math.floor((utc - EPOCH_UTC) / DAY_MS) + 1);
+  }
+
+  /**
+   * The day named by the archive picker's `?date=YYYY-MM-DD` (see
+   * /archive/ and frame-forward.js), or null if the param is absent,
+   * malformed, or not a real calendar date. y/m/d are treated as the
+   * visitor's own local calendar date, exactly like `dayNumber(new Date())`
+   * is at boot — reused via a plain date-like object instead of a real
+   * `new Date(y, mo, d)`, which the puzzle core's own purity test below
+   * forbids inside this block. Needs no upper/lower bound of its own: a
+   * date before day one or after today comes out exactly like never having
+   * loaded the param, because `loadDay` already clamps both ends for
+   * prevday/nextday.
+   */
+  function daysInMonth(y, mo) {
+    if (mo === 1) return y % 4 === 0 && (y % 100 !== 0 || y % 400 === 0) ? 29 : 28;
+    return [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][mo];
+  }
+  function dayFromDateParam(raw) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw || '');
+    if (!m) return null;
+    const y = Number(m[1]), mo = Number(m[2]) - 1, d = Number(m[3]);
+    if (mo < 0 || mo > 11 || d < 1 || d > daysInMonth(y, mo)) return null;
+    return dayNumber({ getFullYear: () => y, getMonth: () => mo, getDate: () => d });
+  }
+
+  function streakAfter(streak, lastFull, day, today, freezeAvailable) {
+    if (day !== today || lastFull >= day) return null;
+    if (lastFull === day - 1) return { streak: streak + 1, lastFull: day };
+    if (freezeAvailable && lastFull > 0 && lastFull === day - 2) return { streak: streak + 1, lastFull: day, freezeUsed: true };
+    return { streak: 1, lastFull: day };
+  }
+
+  // day 2 can only reach the freeze branch when lastFull is the never-played sentinel (0), never a real missed day; every stored freezeUsedDay === 2 is that bug's leftover, so it is safe to always clear it on load.
+  function cleanFreezeUsedDay(freezeUsedDay) {
+    return freezeUsedDay === 2 ? 0 : freezeUsedDay;
+  }
+
+  function titleDay(day, date, past) {
+    return past ? `Day ${day} · ${date}` : `Day ${day} · three new networks every day`;
+  }
+
+  function shareMark(result, par) {
+    if (!result) return '⬛';
+    const over = result - par;
+    if (over < 0) return '⭐' + over;
+    if (over === 0) return '⭐';
+    if (over <= 2) return '🟢+' + over;
+    if (over <= 6) return '🟡+' + over;
+    return '🔴+' + over;
+  }
+
+  function parNote(moves, par) {
+    const over = moves - par;
+    return over < 0 ? `★ ${-over} under par` : over === 0 ? '★ par' : `par ${par}, +${over}`;
+  }
+
+  function readOnward(fragment, self) {
+    const params = new URLSearchParams(String(fragment || '').replace(/^#/, ''));
+    const slug = params.get('next') || '', title = params.get('title') || '';
+    if (slug === self || !/^[a-z0-9][a-z0-9-]{0,39}$/.test(slug) || !/^[A-Za-z0-9][A-Za-z0-9 '’-]{0,23}$/.test(title)) return null;
+    return { slug, title, path: `/games/${slug}/` };
+  }
+
+  /**
+   * One day's saved results, merged with what this tab holds. Two tabs of the
+   * same game write to one store; the later write must not unsolve a puzzle
+   * the other tab solved, or lower a count the player already spent. Entries
+   * are { i: ping history, g: the player's marks, m: spent, s: spent at the
+   * solve or 0, p: par at the solve }.
+   */
+  function mergeDay(saved, current, mineInputs, mineMarks) {
+    return current.map((cur, tier) => {
+      const old = (Array.isArray(saved) && saved[tier]) || {};
+      const m = Math.max(Number(old.m) || 0, cur.m);
+      const oldPath = typeof old.i === 'string' ? old.i : null;
+      const oldMarks = typeof old.g === 'string' ? old.g : '';
+      if (Number(old.s) > 0) return { i: oldPath ?? cur.i, g: oldPath === null ? cur.g : oldMarks, m, s: Number(old.s), p: Number(old.p) || 0 };
+      const oursInputs = !mineInputs || mineInputs[tier] || oldPath === null;
+      const oursMarks = !mineMarks || mineMarks[tier] || oldPath === null;
+      return { i: oursInputs ? cur.i : oldPath, g: oursMarks ? cur.g : oldMarks, m, s: cur.s, p: cur.p };
+    });
+  }
+
+  const core = {
+    GAME_SEED, EPOCH_UTC, DAY_MS, FREEZE_COOLDOWN, N, STATIONS, TIERS, PAIRS, PAIR_COUNT,
+    seeded, pairIndexOf, randomTreeEdges, distMatrix, solveTree, FALLBACK_EDGES, makePuzzle,
+    judge, pingedMap, nextHintPing, forcedEdgeHint, costOf, replay, marksOf, mergeDay, readKey, dayStep, dayNumber, dayFromDateParam, streakAfter, shareMark, parNote, titleDay, readOnward, cleanFreezeUsedDay,
+  };
+  // ---- puzzle core end ----
+
+  // ---- layout & state ----
+  // The width stays 480; the logical height follows the screen's shape
+  // (brand-system §5). A fixed 720 on a 390×844 phone letterboxed a quarter of
+  // the height in matching-colour bars, so H tracks the viewport's aspect ratio
+  // within 720..1040 and the frame fills the screen instead.
+  const W = 480, H_MIN = 720, H_MAX = 1040;
+  let H = H_MIN;
+  const FONT = 'system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif';
+  // Headings and button labels are set in the portal's display face (§3). Its
+  // bytes are embedded below and handed to a FontFace: a game is one
+  // self-contained document and may make no request of its own (the smoke gate
+  // counts an extra same-origin request as a defect, and owned-game-validator
+  // rejects a CSS `url()`). A FontFace, not a `data:` URL, because the /play/*
+  // CSP allows no `data:` font source.
+  const DISPLAY_FONT = 'Righteous';
+  const DISPLAY = `"${DISPLAY_FONT}", ${FONT}`;
+  // The minimum touch target in logical px. In the portal's 3/4 frame a 480-wide
+  // game scales by ~0.65 on a 390×844 phone (measured: canvas 350×469, H 720),
+  // so 68 logical px is ~44.3 CSS px — over the 44 px floor where the frame is
+  // narrowest; everywhere else the same 68 leaves the targets larger still
+  // (bare /play at 390×844 scales 0.81 → 55 CSS px, landscape-in-frame 0.45 →
+  // 31 CSS px against the 24 px landscape floor).
+  const TOUCH = 68;
+  // The smallest type in the game. The same measured scales that set TOUCH set
+  // this: 27 logical px is 17.6 CSS px on a 390×844 phone in the frame (floor
+  // 16) and 12.2 CSS px on an 844×390 one (floor 12) — the two tightest screens
+  // there are, so nothing anywhere is set smaller (ARK-76).
+  const SMALL = 27;
+  const SLUG = 'trunk-line';
+  const STORE = 'arkai:trunk-line:v1', STORE_MUTE = 'arkai:trunk-line:muted';
+  const SHARE_URL = 'https:' + '//arkai.win/games/trunk-line/?ref=share';
+  const HUB_CX = 240;
+  // The board's centre and radius are re-derived by resize(): it centres in the
+  // space between the controls and the status/success area, and shrinks just
+  // enough on a short landscape frame that it never meets the coach line.
+  let HUB_CY = 372, HUB_R = 148;
+
+  const C = {
+    // The lit field (ARK-76): a switchboard room in Trunk Line's own greens —
+    // the old near-black #0a130a is gone, every stop keeps its green channel
+    // well above the near-black line, and the lamp pool over the board does the
+    // lighting. Brand hues (ARK-41) unchanged: accent, warm, violet, faces.
+    bgTop: '#22452d', bgMid: '#1a3a26', bgLow: '#16321f',
+    card: '#1b3323', surface: '#213d2b',
+    ring: '#3a5a42', ringDim: '#2c4a33',
+    accent: '#9ae64c', accentDim: '#4e7a35', cursor: '#facc15',
+    text: '#eaffe4', muted: '#b9d3ab', good: '#6ee7a8', warn: '#fbbf24', bad: '#f87171',
+    pinged: '#7db06a',
+    warm: '#ffb020', warm2: '#ff7a45', inkWarm: '#1a1000', outlineWarm: '#7a4a08',
+    violet: '#3a2680', violetLo: '#2c1c62', violetHi: '#a3b2f5', violetLip: '#241a52',
+    bevelHi: 'rgba(255,255,255,.18)', bevelLo: 'rgba(0,0,0,.35)',
+  };
+
+  // Stations sit on a half-step-rotated ring (first at −126°, not −90°): the
+  // flat of the pentagon faces up, so the coach line above the board never
+  // meets a station's cursor ring, and the one station that points straight
+  // down points at the status line instead of the help of an overlapping pair.
+  const stationAngle = (i) => (i * 2 * Math.PI) / N - Math.PI / 2 - Math.PI / 5;
+  const stationPoint = (i, r = HUB_R) => ({ x: HUB_CX + r * Math.cos(stationAngle(i)), y: HUB_CY + r * Math.sin(stationAngle(i)) });
+
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const statusEl = document.getElementById('status');
+  const controls = document.getElementById('controls');
+  const copyBox = document.getElementById('copybox');
+  const copyText = document.getElementById('copytext');
+  const copyClose = document.getElementById('copyclose');
+  const calmQuery = window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : null;
+  const calm = () => !!(calmQuery && calmQuery.matches);
+
+  // Set by the portal's picture generator (site/scripts/lib/picture-flag.mjs).
+  const PICTURE = window.__arkaiPicture === true;
+
+  const storage = {
+    get(key) { if (PICTURE) return null; try { return localStorage.getItem(key); } catch { return null; } },
+    set(key, value) { if (PICTURE) return true; try { localStorage.setItem(key, value); return true; } catch { return false; } },
+  };
+
+  const S = {
+    mode: 'title',
+    day: 1, today: 1,
+    puzzles: [], runs: [], tier: 0, newDay: false,
+    selected: null, cursor: 0, tapMode: 'ping', marks: new Set(),
+    practice: false, practiceRun: null,
+    help: false, hintLevel: 0,
+    streak: 0, bestStreak: 0, lastFull: 0, freezeUsedDay: 0, storageWarned: false,
+    muted: storage.get(STORE_MUTE) === '1',
+    dayCheck: 5, flash: 0, shake: 0, toast: null,
+    // The pair a just-made connection lit (drawn as the warm burst while the
+    // flash decays), or null when the flash belongs to a solve instead.
+    spark: null,
+    hidden: false,
+    // The action under the pointer right now, so its button can sink onto its
+    // lip; and the element to hand focus back to when the help panel closes.
+    pressed: null, helpReturn: null,
+  };
+  const started = new Set();
+
+  // ---- portal events (same-origin parent only) ----
+  const emit = (event, data) => {
+    if (PICTURE) return; // a photograph is not a play session
+    try {
+      if (window.parent && window.parent !== window) {
+        window.parent.postMessage({ type: 'game-event', event, data: data || {} }, location.origin);
+      }
+    } catch { /* not embedded */ }
+  };
+  // A throw nobody caught is a bug a player has just met, and until now only they knew.
+  // Said once per page: a frame that throws sixty times a second is one fact, not sixty.
+  // Only this page's own script counts (an extension's error is not the game breaking),
+  // and the line travels with it: this file ships byte for byte, so the line is exact.
+  let crashed = false;
+  window.addEventListener('error', (e) => {
+    if (crashed || !String(e.filename).startsWith(location.origin + location.pathname)) return;
+    crashed = true;
+    emit('crash', { line: e.lineno });
+  });
+  const reportFocus = () => emit('focus', { day: S.day, tier: S.tier + 1 });
+
+  let announceTimer = 0, pending = '';
+  const announce = (message) => {
+    pending = pending ? `${pending} ${message}` : message;
+    statusEl.textContent = '';
+    clearTimeout(announceTimer);
+    announceTimer = setTimeout(() => { statusEl.textContent = pending; pending = ''; }, 60);
+  };
+
+  // ---- sound (generated, no assets) ----
+  let audio = null;
+  const ensureAudio = () => {
+    if (S.muted) return;
+    if (!audio) {
+      try { const Ctx = window.AudioContext || window.webkitAudioContext; if (Ctx) audio = new Ctx(); } catch { audio = null; }
+    }
+    if (audio && audio.state === 'suspended') audio.resume().catch(() => {});
+  };
+  const tone = (freq, dur = 0.08, type = 'sine', vol = 0.04, delay = 0, slide = 0) => {
+    if (S.muted || !audio || audio.state !== 'running') return;
+    const t = audio.currentTime + delay;
+    const osc = audio.createOscillator(), gain = audio.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, t);
+    if (slide) osc.frequency.exponentialRampToValueAtTime(Math.max(40, freq + slide), t + dur);
+    gain.gain.setValueAtTime(0, t);
+    gain.gain.linearRampToValueAtTime(vol, t + 0.008);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    osc.connect(gain); gain.connect(audio.destination);
+    osc.start(t); osc.stop(t + dur + 0.02);
+  };
+  const sfx = {
+    // Higher hop count, lower pitch — a longer trunk line "sounds" further away.
+    ping: (dist) => tone(760 - Math.min(dist, 8) * 60, 0.16, 'sine', 0.045, 0, -40),
+    mark: () => tone(520, 0.05, 'square', 0.03),
+    unmark: () => tone(340, 0.05, 'square', 0.025),
+    bump: () => tone(130, 0.08, 'square', 0.025),
+    fail: () => tone(300, 0.3, 'sawtooth', 0.035, 0, -180),
+    win: () => [523, 659, 784, 1047].forEach((f, i) => tone(f, 0.16, 'triangle', 0.045, i * 0.09)),
+    click: () => tone(700, 0.035, 'sine', 0.025),
+    mode: () => tone(600, 0.05, 'triangle', 0.03, 0, 80),
+  };
+
+  // ---- canvas letterbox ----
+  let view = { dpr: 1, cssW: W, cssH: H, scale: 1, ox: 0, oy: 0 };
+  function resize() {
+    invalidate(); // a canvas given a new size is blank until it is drawn again
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const cssW = Math.max(1, canvas.clientWidth), cssH = Math.max(1, canvas.clientHeight);
+    // Height follows the screen's shape, clamped so a very tall phone does not
+    // stretch the layout without bound and a short landscape one keeps a frame
+    // no taller than the screen allows (brand-system §5, §6).
+    H = Math.max(H_MIN, Math.min(H_MAX, Math.round((W * cssH) / cssW)));
+    // The board sits between the coach line (top) and the status area (bottom);
+    // on a short landscape frame it shrinks a little rather than collide with
+    // either, and the whole picture still fits the frame with no scroll. The
+    // bands are wider than they were: at the 27-logical-px type floor the tabs,
+    // the action row and two coach lines reach y≈282 before the board starts.
+    const boardTop = 292, boardBottom = 112;
+    const avail = H - boardTop - boardBottom;
+    HUB_R = Math.max(120, Math.min(158, avail / 2 - 10));
+    HUB_CY = boardTop + avail / 2;
+    canvas.width = Math.round(cssW * dpr);
+    canvas.height = Math.round(cssH * dpr);
+    const scale = Math.min(cssW / W, cssH / H);
+    view = { dpr, cssW, cssH, scale, ox: (cssW - W * scale) / 2, oy: (cssH - H * scale) / 2 };
+  }
+  function toLogical(clientX, clientY) {
+    const rect = canvas.getBoundingClientRect();
+    return { x: (clientX - rect.left - view.ox) / view.scale, y: (clientY - rect.top - view.oy) / view.scale };
+  }
+
+  // ---- helpers ----
+  const puzzle = () => S.puzzles[S.tier];
+  const run = () => (S.practice ? S.practiceRun : S.runs[S.tier]);
+  const solvedCount = () => S.runs.filter((r) => r.solved).length;
+  const locked = () => run().solved && !S.practice;
+  const archive = () => S.day < S.today;
+  const dayDate = (day) => new Date(EPOCH_UTC + (day - 1) * DAY_MS).toLocaleDateString('en-US', { month: 'long', day: 'numeric', timeZone: 'UTC' });
+  const ONWARD = !PICTURE && /^https?:$/.test(location.protocol) ? readOnward(location.hash, SLUG) : null;
+  // A specific day named by the archive picker on /archive/, forwarded into
+  // this iframe the same way a friend code is (frame-forward.js). Read once
+  // at boot; dayFromDateParam already returns null for anything malformed.
+  const DATE_RAW = !PICTURE && /^https?:$/.test(location.protocol) ? new URLSearchParams(location.search).get('date') : null;
+  const onwardLink = document.getElementById('onward');
+  const onward = () => ONWARD !== null && solvedCount() === TIERS.length;
+  // ---- onward click plan begin ----
+  function onwardClickPlan(event, available) {
+    if (!event.isTrusted || !available || event.altKey) return 'ignore';
+    if (event.ctrlKey || event.metaKey || event.shiftKey || event.button !== 0) return 'count';
+    return 'navigate';
+  }
+  function onwardAuxclickPlan(event, available) {
+    return event.isTrusted && available && event.button === 1 ? 'count' : 'ignore';
+  }
+  // ---- onward click plan end ----
+  if (ONWARD) {
+    onwardLink.addEventListener('click', (event) => {
+      const plan = onwardClickPlan(event, onward());
+      if (plan === 'ignore') return;
+      if (plan === 'count') { countOnward(); return; }
+      event.preventDefault();
+      goOnward();
+    });
+    onwardLink.addEventListener('auxclick', (event) => {
+      if (onwardAuxclickPlan(event, onward()) === 'count') countOnward();
+    });
+  }
+  function countOnward() { emit('next_game', { day: S.day }); }
+  function goOnward() {
+    if (!ONWARD || !onward()) return;
+    sfx.click();
+    countOnward();
+    setTimeout(() => onwardLink.click(), 100);
+  }
+  const titleSummary = () => `Day ${S.day}${archive() ? `, ${dayDate(S.day)}, from the archive` : ''}. ${solvedCount()} of 3 puzzles solved.`;
+
+  // duration in seconds; hints get longer than a passive ping/mark toast
+  // because they are deliberately requested and worth actually reading.
+  const toast = (message, spoken = message, duration = 2.6) => { S.toast = { text: message, t: 0, duration }; announce(spoken); };
+  const shake = (amount) => { if (!calm()) S.shake = amount; };
+
+  function describeState() {
+    const p = puzzle(), r = run();
+    const map = pingedMap(p, r.pings);
+    const pings = map.size ? [...map.entries()].map(([idx, d]) => `${STATIONS[PAIRS[idx][0]]}-${STATIONS[PAIRS[idx][1]]}: ${d}`).join(', ') : 'none yet';
+    const marks = S.marks.size ? [...S.marks].map((idx) => `${STATIONS[PAIRS[idx][0]]}-${STATIONS[PAIRS[idx][1]]}`).join(', ') : 'none';
+    const sel = S.selected === null ? 'none' : STATIONS[S.selected];
+    // The same next step the line over the board shows, for anyone who cannot see it.
+    const coach = S.mode === 'play' ? coachLines() : null;
+    return `${S.tapMode} mode. Selected: ${sel}. ${r.pings.length} pings spent, par ${p.par}. Pings: ${pings}. Marks: ${marks}.${coach ? ` ${coach.join(' ')}` : ''}`;
+  }
+
+  // Level 1 is the same every day, on purpose: it is solveTree's own first
+  // phase (ping the root against everyone) restated in plain language, true
+  // of every hidden tree this game can generate, so it reveals nothing about
+  // today's specific network.
+  const HINT1_TEXT = 'Ping station A against every other station first — that alone tells you who is one hop away.';
+  const HINT2_PARENT_TEXT = 'You know every station’s distance from A now. Ping a station whose parent is still unknown against a station one level closer to A.';
+
+  /** Turns a hint level plus the player's own known distances/marks into on-screen copy. Never reads puzzle.hidden. */
+  function hintText(level, known, marks) {
+    if (level === 1) return HINT1_TEXT;
+    if (level === 2) {
+      const next = nextHintPing(known);
+      return next.type === 'pair' ? `Try ${STATIONS[next.a]}–${STATIONS[next.b]} next.` : HINT2_PARENT_TEXT;
+    }
+    const forced = forcedEdgeHint(known, marks);
+    if (!forced) return 'Not enough pings yet to force a line — try a few more, then ask again.';
+    const [a, b] = forced.pair;
+    return `${STATIONS[a]}–${STATIONS[b]} must be a direct line — nothing else fits what you have pinged so far.`;
+  }
+
+  function doHint() {
+    if (S.mode !== 'play' || locked()) return;
+    ensureAudio();
+    const p = puzzle(), r = run();
+    S.hintLevel = Math.min(3, S.hintLevel + 1);
+    const known = pingedMap(p, r.pings);
+    const text = hintText(S.hintLevel, known, S.marks);
+    sfx.click();
+    toast(text, `Hint level ${S.hintLevel}. ${text}`, 6);
+    if (!S.practice) emit('hint', { level: S.hintLevel, tier: S.tier + 1, day: S.day, archive: archive() });
+  }
+
+  // ---- persistence ----
+  function parseStore(raw) {
+    try {
+      const data = JSON.parse(raw || 'null');
+      return data && typeof data === 'object' && data.days && typeof data.days === 'object' ? data : { days: {} };
+    } catch { return { days: {} }; }
+  }
+  const readStore = () => parseStore(storage.get(STORE));
+
+  function entryFor(tier) {
+    const r = S.runs[tier];
+    return { i: r.inputs, g: Array.from(r.marks ?? []).join('.'), m: r.moves, s: r.solved ? r.solvedMoves : 0, p: r.solved ? r.par : 0 };
+  }
+
+  function currentEntries() {
+    return S.runs.map((r, tier) => (tier === S.tier && !S.practice ? { i: r.inputs, g: Array.from(S.marks).join('.'), m: r.moves, s: r.solved ? r.solvedMoves : 0, p: r.solved ? r.par : 0 } : entryFor(tier)));
+  }
+
+  function writeStore() {
+    const data = readStore();
+    data.days[S.day] = mergeDay(data.days[S.day], currentEntries(), null, null);
+    if (solvedCount() === TIERS.length) {
+      const freezeAvailable = !S.freezeUsedDay || S.day - S.freezeUsedDay >= FREEZE_COOLDOWN;
+      const next = streakAfter(S.streak, S.lastFull, S.day, S.today, freezeAvailable);
+      if (next) {
+        S.streak = next.streak; S.lastFull = next.lastFull; S.bestStreak = Math.max(S.bestStreak, S.streak);
+        if (next.freezeUsed) { S.freezeUsedDay = S.day; toast('Missed a day — your streak freeze covered it.'); }
+      }
+    }
+    data.streak = S.streak; data.best = S.bestStreak; data.lastFull = S.lastFull; data.freezeUsedDay = S.freezeUsedDay;
+    if (!storage.set(STORE, JSON.stringify(data)) && !S.storageWarned) {
+      S.storageWarned = true;
+      toast('This browser is not keeping your progress.');
+    }
+  }
+
+  function absorb(data) {
+    const saved = data.days[S.day];
+    if (Array.isArray(saved)) {
+      const merged = mergeDay(saved, currentEntries(), null, null);
+      merged.forEach((entry, tier) => {
+        const r = S.runs[tier];
+        r.moves = entry.m;
+        if (entry.s > 0 && !(r.solved && r.solvedMoves === entry.s)) {
+          const state = replay(entry.i);
+          r.solved = true; r.solvedMoves = entry.s; r.par = entry.p;
+          r.inputs = state.inputs; r.pings = state.pings;
+          r.marks = new Set(marksOf(entry.g));
+          emit('closed', { day: S.day, tier: tier + 1 });
+          if (tier === S.tier && !S.practice) { S.marks = new Set(r.marks); toast(`${TIERS[tier].label} was solved in another tab, in ${entry.s}.`); }
+        }
+      });
+    }
+    S.streak = Number(data.streak) || 0;
+    S.bestStreak = Math.max(S.bestStreak, Number(data.best) || 0);
+    S.lastFull = Number(data.lastFull) || 0;
+    S.freezeUsedDay = cleanFreezeUsedDay(Number(data.freezeUsedDay) || 0);
+  }
+
+  function selectTier(tier) {
+    S.tier = tier;
+    S.practice = false; S.practiceRun = null;
+    S.help = false;
+    S.flash = 0; S.shake = 0;
+    S.selected = null; S.cursor = 0;
+    S.marks = new Set(run().marks);
+    S.hintLevel = 0;
+  }
+
+  /** Opens a day's three puzzles: today, or any earlier day back to day 1. */
+  function loadDay(day) {
+    S.today = dayNumber(new Date());
+    day = Math.min(Math.max(1, day), S.today);
+    S.day = day;
+    S.newDay = false;
+    S.puzzles = TIERS.map((_, tier) => makePuzzle(day, tier));
+    const data = readStore();
+    const saved = Array.isArray(data.days[day]) ? data.days[day] : [];
+    S.streak = Number(data.streak) || 0;
+    S.bestStreak = Number(data.best) || 0;
+    S.lastFull = Number(data.lastFull) || 0;
+    S.freezeUsedDay = cleanFreezeUsedDay(Number(data.freezeUsedDay) || 0);
+    S.runs = S.puzzles.map((p, tier) => {
+      const entry = saved[tier] || {};
+      const state = replay(entry.i);
+      const solvedMoves = Number(entry.s) || 0;
+      return {
+        inputs: state.inputs, pings: state.pings,
+        marks: new Set(marksOf(entry.g)),
+        moves: Math.max(Number(entry.m) || 0, state.moves),
+        solved: solvedMoves > 0, solvedMoves, par: Number(entry.p) || 0,
+      };
+    });
+    const firstOpen = S.runs.findIndex((r) => !r.solved);
+    selectTier(firstOpen < 0 ? 0 : firstOpen);
+  }
+
+  const POSE = { day: 40, tier: 1 };
+  function posePicture() {
+    S.day = S.today = POSE.day;
+    S.puzzles = TIERS.map((_, tier) => makePuzzle(POSE.day, tier));
+    S.runs = S.puzzles.map((p, tier) => {
+      if (tier < POSE.tier) return { inputs: '', pings: [], marks: new Set(), moves: p.par, solved: true, solvedMoves: p.par, par: p.par };
+      if (tier === POSE.tier) {
+        const idx = pairIndexOf(0, 1);
+        return { inputs: String(idx), pings: [idx], marks: new Set([pairIndexOf(0, 2)]), moves: 1, solved: false, solvedMoves: 0, par: 0 };
+      }
+      return { inputs: '', pings: [], marks: new Set(), moves: 0, solved: false, solvedMoves: 0, par: 0 };
+    });
+    selectTier(POSE.tier);
+    S.marks = new Set(S.runs[POSE.tier].marks);
+    S.mode = 'play';
+  }
+
+  function markStart() {
+    const key = `${S.day}:${S.tier}`;
+    if (run().solved || started.has(key)) return;
+    started.add(key);
+    emit('start', { game: SLUG, day: S.day, tier: S.tier + 1, archive: archive() });
+  }
+
+  function followToday() {
+    const today = dayNumber(new Date());
+    if (today === S.today) return false;
+    if (S.day !== S.today) { S.today = today; return false; }
+    loadDay(today);
+    return true;
+  }
+
+  function checkDay() {
+    if (PICTURE || dayNumber(new Date()) === S.today) return;
+    // A new day changes the screen with no event to say so, but only once: mid-puzzle
+    // S.today stays behind on purpose, and this check comes round every five seconds.
+    if (S.mode === 'play' && S.day === S.today) {
+      if (!S.newDay) {
+        invalidate();
+        S.newDay = true;
+        toast('A new set of networks is out. Press Esc.');
+      }
+      return;
+    }
+    invalidate(); // followToday() catches S.today up, so this runs once a day too
+    followToday();
+  }
+
+  function stepDay(delta) {
+    const target = S.day + delta;
+    if (target < 1 || target > dayNumber(new Date())) {
+      sfx.bump();
+      announce(target < 1 ? 'Day 1 is the first day.' : 'This is today. New networks come at midnight.');
+      return;
+    }
+    S.mode = 'title'; S.help = false; S.toast = null;
+    loadDay(target);
+    sfx.click();
+    announce(titleSummary());
+  }
+
+  // ---- game flow ----
+  function goTitle() {
+    S.mode = 'title';
+    S.help = false;
+    followToday();
+    sfx.click();
+    announce(titleSummary());
+  }
+
+  function startPlay(tier) {
+    ensureAudio();
+    followToday();
+    if (tier !== undefined && tier !== S.tier) selectTier(tier);
+    else {
+      // Same tier as before: selectTier() (which clears practice) is skipped,
+      // so an in-progress practice run must be cleared here instead — title →
+      // play on an already-solved, already-practiced tier must land back on
+      // the real, saved run, not resume the stale practice one (echo-sounding
+      // guards this exact path in its own startPlay()).
+      S.practice = false; S.practiceRun = null;
+      S.marks = new Set(run().marks);
+    }
+    S.mode = 'play';
+    S.help = false; S.toast = null;
+    sfx.click();
+    markStart();
+    announce(`Day ${S.day}, ${TIERS[S.tier].label}, par ${puzzle().par}. ${describeState()}`);
+    reportFocus();
+  }
+
+  function setTier(tier) {
+    if (S.mode !== 'play' || tier === S.tier) return;
+    selectTier(tier);
+    markStart();
+    sfx.click();
+    announce(`${TIERS[tier].label}. Par ${puzzle().par}. ${describeState()}`);
+    reportFocus();
+  }
+
+  function toggleTapMode() {
+    S.tapMode = S.tapMode === 'ping' ? 'mark' : 'ping';
+    S.selected = null;
+    sfx.mode();
+    announce(S.tapMode === 'ping' ? 'Ping mode.' : 'Mark mode.');
+  }
+
+  // A ping proves exactly one thing outright: 1 hop is a direct line, more is
+  // not. The game acts on that proof itself — marks the line, or takes back a mark
+  // the answer rules out — and says so. Players met the board without it: none of
+  // the first sixteen real starts (2026-09-21…23) found how pings become marks.
+  function doPing(a, b) {
+    const p = puzzle(), r = run();
+    const idx = pairIndexOf(a, b);
+    const dist = p.dist[a][b];
+    const hops = `${dist} hop${dist === 1 ? '' : 's'}`;
+    // Asking again tells nothing new, so it costs nothing: the answer is repeated.
+    const again = r.pings.includes(idx);
+    if (!again) {
+      r.pings.push(idx);
+      r.inputs = r.inputs ? `${r.inputs}.${idx}` : String(idx);
+      r.moves++;
+    }
+    let note;
+    if (dist === 1) {
+      if (S.marks.has(idx)) note = 'a direct line, as you marked';
+      else if (S.marks.size < N - 1) { S.marks.add(idx); note = 'a direct line, marked for you'; }
+      else note = 'a direct line. Clear a wrong mark to add it';
+    } else if (S.marks.has(idx)) {
+      S.marks.delete(idx);
+      note = 'not a direct line, so its mark is gone';
+    } else note = 'not a direct line';
+    // A connection made is the moment the whole game leans on: the copper line
+    // lights, and a warm burst opens from the pair's midpoint while the flash
+    // decays. Reduced motion gets the line and the mark, not the burst.
+    if (dist === 1 && !calm()) { S.spark = idx; S.flash = 0.5; }
+    r.marks = new Set(S.marks);
+    // A repeat reports the same count: to the portal it is still a move on this puzzle.
+    if (!S.practice) { emit('progress', { moves: run().moves, tier: S.tier + 1, day: S.day, archive: archive() }); writeStore(); }
+    ensureAudio();
+    sfx.ping(dist);
+    const said = again ? `${note}. Pinged already, no charge` : note;
+    toast(`${STATIONS[a]}–${STATIONS[b]}: ${hops} — ${said}.`, `Pinged ${STATIONS[a]} and ${STATIONS[b]}. ${hops} apart: ${said}.`, 3.2);
+  }
+
+  function doMark(a, b) {
+    const idx = pairIndexOf(a, b);
+    if (S.marks.has(idx)) {
+      S.marks.delete(idx);
+      sfx.unmark();
+      announce(`Unmarked ${STATIONS[a]}–${STATIONS[b]}.`);
+    } else {
+      // A pair already pinged at 2 hops or more is proven not to be a line: marking
+      // it could only buy a wrong check.
+      const dist = puzzle().dist[a][b];
+      if (dist > 1 && run().pings.includes(idx)) { toast(`${STATIONS[a]}–${STATIONS[b]} pinged ${dist} hops apart — not a direct line.`); sfx.bump(); return; }
+      if (S.marks.size >= N - 1) { toast(`Mark up to ${N - 1} lines. Clear one first.`); sfx.bump(); return; }
+      S.marks.add(idx);
+      sfx.mark();
+      announce(`Marked ${STATIONS[a]}–${STATIONS[b]}.`);
+    }
+    run().marks = new Set(S.marks);
+    if (!S.practice) writeStore();
+  }
+
+  function selectStation(i) {
+    if (S.mode !== 'play' || locked()) return;
+    if (S.selected === null) { S.selected = i; sfx.click(); announce(`Selected ${STATIONS[i]}.`); return; }
+    if (S.selected === i) { S.selected = null; sfx.click(); announce(`Deselected ${STATIONS[i]}.`); return; }
+    const a = S.selected, b = i;
+    S.selected = null;
+    if (S.tapMode === 'ping') doPing(a, b); else doMark(a, b);
+  }
+
+  /**
+   * A second, arrow-key path to the same five stations as Q/W/E/D/F, for
+   * anyone who reaches for arrows before reading the instructions. `cursor`
+   * is a plain highlight, separate from `selected` (the pending first tap of
+   * a pair) — moving it never starts or cancels a selection on its own,
+   * Enter does, the same two-step shape as a tap or a letter key.
+   */
+  function moveCursor(delta) {
+    if (S.mode !== 'play') return;
+    S.cursor = (S.cursor + delta + N) % N;
+    sfx.click();
+    announce(`Cursor at ${STATIONS[S.cursor]}.`);
+  }
+
+  function clearMarks() {
+    if (S.mode !== 'play' || locked() || !S.marks.size) return;
+    S.marks.clear();
+    run().marks = new Set();
+    if (!S.practice) writeStore();
+    sfx.click();
+    announce('Marks cleared.');
+  }
+
+  function toggleMute() {
+    S.muted = !S.muted;
+    storage.set(STORE_MUTE, S.muted ? '1' : '0');
+    if (S.muted) { if (audio) audio.suspend().catch(() => {}); } else ensureAudio();
+    announce(S.muted ? 'Muted.' : 'Sound on.');
+  }
+
+  function celebrate(brightness = 0.5) {
+    sfx.win();
+    S.spark = null; // the flash is the solve's own glow, not a pair's burst
+    if (!calm()) S.flash = brightness;
+  }
+
+  function solvedNow() {
+    const p = puzzle(), r = run();
+    if (S.practice) {
+      celebrate();
+      const over = r.moves - p.par;
+      // One line, always: a wrapped toast climbs the board's lowest station
+      // (ARK-94). Practice has no panel, so the toast itself carries the count.
+      // Spoken in full, as before ARK-94: "+3" means nothing without "par".
+      toast(`Practice solved in ${r.moves}${over < 0 ? `, ${-over} under.` : over === 0 ? ' — par!' : `, +${over}.`}`,
+        `Practice solved in ${r.moves}. ${over <= 0 ? 'Par!' : `${over} over par.`}`);
+      return;
+    }
+    r.solved = true; r.solvedMoves = r.moves; r.par = p.par;
+    writeStore();
+    const over = r.solvedMoves - p.par;
+    // Meeting or beating par is the celebration worth the name: a longer, warmer
+    // wash over the lit board, the star on the panel below, and the chord.
+    celebrate(over <= 0 ? 0.9 : 0.5);
+    emit('gameover', { won: true, score: r.solvedMoves, par: p.par, tier: S.tier + 1, day: S.day, archive: archive(), streak: S.streak });
+    // The panel above already says the verdict and the star, so the toast is only
+    // the nudge onwards — and only ever one line: the old verdict toast wrapped to
+    // three lines, started at y≈582 and stood over station D for its whole 3 s at
+    // 390×844 (ARK-94). The full verdict still reaches screen readers spoken.
+    const nudge = solvedCount() === TIERS.length ? 'All three lines solved.' : 'The next line is ready.';
+    const verdict = over < 0 ? `${-over} under par: a very clean trace.` : over === 0 ? 'Par! A star.' : `Solved, ${over} over par.`;
+    toast(nudge, `${verdict} ${nudge}`);
+  }
+
+  function doCheck() {
+    if (S.mode !== 'play' || locked()) return;
+    const p = puzzle(), r = run();
+    const verdict = judge(p, Array.from(S.marks));
+    if (verdict.ok) { solvedNow(); return; }
+    if (verdict.reason === 'count') { toast(`Mark exactly ${N - 1} lines first.`); sfx.bump(); return; }
+    ensureAudio();
+    r.inputs = r.inputs ? `${r.inputs}.x` : 'x';
+    r.moves += 2;
+    if (!S.practice) writeStore();
+    toast('Not quite. Ping another pair to narrow it down. Cost 2.');
+    sfx.fail(); shake(5);
+  }
+
+  function startPractice() {
+    if (!run().solved) return;
+    // Re-triggering practice (the replay button/key work any time it is
+    // active) must not re-emit `practice` on every click — the exact bug
+    // session #239 found and fixed in one-step-late/ink-side-down. Computed
+    // before S.practice flips, so a second call sees itself already practicing.
+    const enteringPractice = !S.practice;
+    S.practice = true;
+    S.practiceRun = { inputs: '', pings: [], marks: new Set(), moves: 0, solved: false, solvedMoves: 0, par: puzzle().par };
+    S.marks = new Set();
+    S.selected = null;
+    S.hintLevel = 0;
+    S.mode = 'play';
+    sfx.click();
+    if (enteringPractice) emit('practice', { tier: S.tier + 1, day: S.day, archive: archive() });
+    announce('Practice run. Nothing here is saved.');
+  }
+
+  function goNext() {
+    const nextTier = S.runs.findIndex((r, i) => i > S.tier && !r.solved);
+    selectTier(nextTier < 0 ? (S.tier + 1) % TIERS.length : nextTier);
+    S.mode = 'play';
+    markStart();
+    sfx.click();
+    announce(`${TIERS[S.tier].label}. Par ${puzzle().par}. ${describeState()}`);
+    reportFocus();
+  }
+
+  function shareText() {
+    const marks = S.runs.map((r, tier) => shareMark(r.solvedMoves, S.puzzles[tier].par));
+    return `Trunk Line #${S.day}${archive() ? ' (archive)' : ''}\n${marks.join('  ')}\n${SHARE_URL}`;
+  }
+  function openCopyBox(message) {
+    copyText.value = message;
+    copyBox.classList.add('open');
+    copyText.focus(); copyText.select();
+  }
+  function share() {
+    const message = shareText();
+    sfx.click();
+    const shared = () => emit('share', { day: S.day, score: solvedCount() });
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      // The promise resolves outside every handler: the toast and the copy box
+      // both land with no event to draw them, so each callback invalidates first.
+      navigator.clipboard.writeText(message).then(
+        () => { invalidate(); shared(); toast('Copied! Paste it anywhere.'); },
+        () => { invalidate(); openCopyBox(message); },
+      );
+    } else openCopyBox(message);
+  }
+  // The dialog is a page element over the canvas, but closing it hands focus back
+  // to the canvas: draw the frame so the picture is never left stale.
+  copyClose.addEventListener('click', () => {
+    invalidate();
+    copyBox.classList.remove('open');
+    canvas.focus();
+  });
+
+  // ---- update ----
+  // What advances between frames: the flash of a solve, the shake of a wrong
+  // check and the age of the toast. The drawing only reads these, so on a still
+  // screen nothing moves and the loop can stop; a hidden tab or the photographer's
+  // pose stands still, exactly as the old frame() passed a zero dt to drawEffects().
+  function update(dt) {
+    if (PICTURE || S.hidden) return;
+    if (S.flash > 0) S.flash = Math.max(0, S.flash - dt * 1.5);
+    if (S.shake > 0) S.shake = Math.max(0, S.shake - dt * 20);
+    // An open How to play hides the toast (ARK-94), so its clock waits: a
+    // one-time notice — a new day, storage lost — shows once the panel closes
+    // instead of running out unseen under it (ARK-77).
+    if (S.toast && !S.help) {
+      S.toast.t += dt;
+      // A toast sits still from the frame it lands to the frame it leaves, so
+      // it animates nothing while it is up — ending one is what draws again
+      // (ARK-94: repainting it for its whole 3.2 s was the ×4 frame cost).
+      if (S.toast.t >= (S.toast.duration ?? 2.6)) { S.toast = null; invalidate(); }
+    }
+  }
+
+  // ---- hit testing & shared shapes ----
+  let hitRegions = [];
+  const addHit = (x, y, w, h, action) => hitRegions.push({ x, y, w, h, action });
+  function hitTest(x, y) {
+    for (let i = hitRegions.length - 1; i >= 0; i--) {
+      const r = hitRegions[i];
+      if (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) return r.action;
+    }
+    return null;
+  }
+
+  function roundRect(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  // ---- the lit field (painted once per canvas size) ----
+  // The scene behind every screen: a deep-green switchboard room, a lamp pool
+  // where the board sits, a faint linen of fixed threads for material, and a
+  // vignette for depth — the flat near-black #0a130a the owner rejected had
+  // none of this. None of it changes while you play, so, the pattern Snake's
+  // ARK-62 board cache set, it is painted once per canvas size into a canvas of
+  // its own and copied by render(). This block sits above the rendering marker
+  // only because building the cache writes to the offscreen canvas (oc.width),
+  // which the drawing audit below reads as a mutation of something: nothing
+  // here touches game state, the clock or randomness — the threads are a fixed
+  // pattern, so two photographs of the same frame are the same picture.
+  function paintBackdrop(ctx) {
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, C.bgTop);
+    g.addColorStop(0.55, C.bgMid);
+    g.addColorStop(1, C.bgLow);
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+    // The lamp over the board: one pool of light, where the eye is meant to go.
+    const pool = ctx.createRadialGradient(HUB_CX, HUB_CY, HUB_R * 0.2, HUB_CX, HUB_CY, HUB_R * 1.9);
+    pool.addColorStop(0, 'rgba(122,204,138,0.20)');
+    pool.addColorStop(0.55, 'rgba(74,168,92,0.10)');
+    pool.addColorStop(1, 'rgba(74,168,92,0)');
+    ctx.fillStyle = pool;
+    ctx.fillRect(0, 0, W, H);
+    // Linen: fixed horizontal and vertical threads, a texture the eye can feel
+    // without reading it as graph paper.
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = 'rgba(178,255,196,0.028)';
+    ctx.beginPath();
+    for (let y = 3; y < H; y += 7) { ctx.moveTo(0, y); ctx.lineTo(W, y); }
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(178,255,196,0.016)';
+    ctx.beginPath();
+    for (let x = 5; x < W; x += 11) { ctx.moveTo(x, 0); ctx.lineTo(x, H); }
+    ctx.stroke();
+    // Vignette: the corners fall away from the lamp, but never into near-black.
+    const v = ctx.createRadialGradient(W / 2, H * 0.46, H * 0.28, W / 2, H * 0.52, H * 0.78);
+    v.addColorStop(0, 'rgba(0,0,0,0)');
+    v.addColorStop(1, 'rgba(4,12,6,0.34)');
+    ctx.fillStyle = v;
+    ctx.fillRect(0, 0, W, H);
+  }
+  let backdropCanvas = null, backdropKey = '';
+  function drawBackdrop() {
+    const unit = view.dpr * view.scale; // device pixels per logical pixel
+    if (!(unit > 0)) return;
+    const px = view.dpr * view.ox, py = view.dpr * view.oy;
+    const fx = px - Math.floor(px), fy = py - Math.floor(py);
+    const key = `${unit}:${fx}:${fy}:${H}:${Math.round(HUB_CY)}:${Math.round(HUB_R)}`;
+    if (backdropKey !== key) {
+      const oc = backdropCanvas || document.createElement('canvas');
+      oc.width = Math.ceil(W * unit + 1);
+      oc.height = Math.ceil(H * unit + 1);
+      const c = oc.getContext('2d');
+      c.setTransform(unit, 0, 0, unit, fx, fy);
+      paintBackdrop(c);
+      backdropCanvas = oc;
+      backdropKey = key;
+    }
+    ctx.drawImage(backdropCanvas, -fx / unit, -fy / unit, backdropCanvas.width / unit, backdropCanvas.height / unit);
+  }
+
+  // ---- rendering ----
+  // Every control is an object, built like the portal's `.button` (brand-system
+  // §4): a 2 px darker outline, a solid darker lip under the body as its own
+  // shape (so a press collapses just it), a glossy highlight band over a
+  // gradient body, and a display-face label. The one primary action per screen
+  // is warm; every other button is flat violet. Pressed = the body sinks onto
+  // the lip. The drawn pill may stay smaller than the touch floor; hitBox()
+  // pads the tap target independently of what is drawn.
+  const LIP = 6;
+  const BTN = {
+    primary: { hi: '#ffd166', mid: C.warm, lo: C.warm2, outline: C.outlineWarm, lip: C.outlineWarm, ink: C.inkWarm, gloss: 'rgba(255,255,255,.5)' },
+    secondary: { hi: '#4a3596', mid: C.violet, lo: C.violetLo, outline: C.violetHi, lip: C.violetLip, ink: '#eef2ff', gloss: C.bevelHi },
+  };
+
+  // A tap target at least TOUCH logical px on both axes, centred on the drawn
+  // rect so it never drifts and never pushes a neighbour off the board.
+  function hitBox(x, y, w, h, action) {
+    const hw = Math.max(TOUCH, w), hh = Math.max(TOUCH, h);
+    addHit(x + (w - hw) / 2, y + (h - hh) / 2, hw, hh, action);
+  }
+
+  // The framed panel (brand-system §4): a 3.5 px accent frame, an inner bevel —
+  // a light line on top, a dark line at the bottom — over a surface lighter
+  // than the field, so a panel reads as a raised tile, not a hole.
+  function panelFrame(x, y, w, h, r = 16) {
+    ctx.fillStyle = C.surface; roundRect(x, y, w, h, r); ctx.fill();
+    ctx.strokeStyle = C.accent; ctx.lineWidth = 3.5; roundRect(x, y, w, h, r); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x + r + 2, y + 4); ctx.lineTo(x + w - r - 2, y + 4);
+    ctx.strokeStyle = C.bevelHi; ctx.lineWidth = 2; ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x + r + 2, y + h - 4); ctx.lineTo(x + w - r - 2, y + h - 4);
+    ctx.strokeStyle = C.bevelLo; ctx.lineWidth = 2; ctx.stroke();
+  }
+
+  // The title plaque, a warm pill overlapping a panel's top edge (§4).
+  function plaque(cx, cy, label) {
+    ctx.font = `400 ${SMALL}px ${DISPLAY}`;
+    const pw = ctx.measureText(label).width + 44, ph = 42;
+    const grad = ctx.createLinearGradient(0, cy - ph / 2, 0, cy + ph / 2);
+    grad.addColorStop(0, C.warm); grad.addColorStop(1, C.warm2);
+    ctx.fillStyle = grad; roundRect(cx - pw / 2, cy - ph / 2, pw, ph, ph / 2); ctx.fill();
+    ctx.strokeStyle = C.outlineWarm; ctx.lineWidth = 2; roundRect(cx - pw / 2, cy - ph / 2, pw, ph, ph / 2); ctx.stroke();
+    ctx.fillStyle = C.inkWarm; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(label, cx, cy + 1);
+  }
+
+  // The reward, drawn wherever a line was met or beaten: a gold star with a
+  // radial shade and (optionally) a glow — never a text glyph, never a flash.
+  function star(cx, cy, r, glow) {
+    ctx.save();
+    if (glow) { ctx.shadowColor = 'rgba(251,191,36,0.85)'; ctx.shadowBlur = 14; }
+    const g = ctx.createRadialGradient(cx - r * 0.3, cy - r * 0.3, r * 0.1, cx, cy, r);
+    g.addColorStop(0, '#fef3c7'); g.addColorStop(0.5, '#fbbf24'); g.addColorStop(1, '#b45309');
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    for (let i = 0; i < 10; i++) {
+      const a = (Math.PI / 5) * i - Math.PI / 2;
+      const rr = i % 2 === 0 ? r : r * 0.45;
+      ctx.lineTo(cx + Math.cos(a) * rr, cy + Math.sin(a) * rr);
+    }
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function button(x, y, w, h, label, action, kind = 'secondary', enabled = true) {
+    const spec = kind === 'primary' ? BTN.primary : BTN.secondary;
+    const pressed = enabled && S.pressed === action;
+    const bodyY = pressed ? y + LIP : y, bodyH = h - LIP, r = Math.min(14, bodyH / 2);
+    // The lip is the body's own shape dropped by LIP, so only its rounded lower
+    // edge shows under the body. A LIP-high strip with the body's radius made
+    // arcTo overshoot into a tail at the lower right of every button.
+    if (!pressed) {
+      ctx.fillStyle = enabled ? spec.lip : '#1b2a17';
+      roundRect(x, y + LIP, w, bodyH, r); ctx.fill();
+    }
+    const body = ctx.createLinearGradient(0, bodyY, 0, bodyY + bodyH);
+    if (enabled) { body.addColorStop(0, spec.hi); body.addColorStop(0.45, spec.mid); body.addColorStop(1, spec.lo); }
+    else { body.addColorStop(0, '#1b2a17'); body.addColorStop(1, '#12200f'); }
+    ctx.fillStyle = body; roundRect(x, bodyY, w, bodyH, r); ctx.fill();
+    const gloss = ctx.createLinearGradient(0, bodyY, 0, bodyY + bodyH);
+    gloss.addColorStop(0, enabled ? spec.gloss : 'rgba(255,255,255,.06)');
+    gloss.addColorStop(0.5, 'rgba(255,255,255,0)');
+    ctx.fillStyle = gloss; roundRect(x, bodyY, w, bodyH, r); ctx.fill();
+    ctx.strokeStyle = enabled ? spec.outline : C.accentDim; ctx.lineWidth = 2;
+    roundRect(x, bodyY, w, bodyH, r); ctx.stroke();
+    ctx.fillStyle = !enabled ? C.muted : spec.ink;
+    ctx.font = `400 28px ${DISPLAY}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(label, x + w / 2, bodyY + bodyH / 2 + 1);
+    if (enabled) hitBox(x, y, w, h, action);
+  }
+
+  // Both modes in view, the live one lit. The single button this replaces showed
+  // the current mode as its label, so "Ping" read as an action — and pressing it
+  // switched to marking.
+  function modeSwitch(x, y, w, h) {
+    const enabled = !locked(), half = w / 2;
+    ctx.fillStyle = C.card; roundRect(x, y, w, h, 12); ctx.fill();
+    ctx.fillStyle = enabled ? C.accent : C.accentDim;
+    roundRect(S.tapMode === 'ping' ? x : x + half, y, half, h, 12); ctx.fill();
+    ctx.strokeStyle = C.accent; ctx.lineWidth = 3; roundRect(x, y, w, h, 12); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x + 12, y + 3); ctx.lineTo(x + w - 12, y + 3);
+    ctx.strokeStyle = C.bevelHi; ctx.lineWidth = 2; ctx.stroke();
+    ctx.font = `400 ${SMALL}px ${DISPLAY}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ['ping', 'mark'].forEach((m, i) => {
+      const on = S.tapMode === m;
+      ctx.fillStyle = !enabled ? C.muted : on ? C.inkWarm : C.text;
+      ctx.fillText(m === 'ping' ? 'Ping' : 'Mark', x + half * i + half / 2, y + h / 2 + 1);
+      if (enabled) hitBox(x + half * i, y, half, h, `mode${m}`);
+    });
+  }
+
+  // What the pings have proved about the marks: how many of them a 1-hop ping
+  // confirmed, a proven line still left unmarked, and a mark a ping has already
+  // ruled out — only a save from before 2026-09-23 can hold one (-1: none).
+  function proof() {
+    let confirmed = 0, unmarked = -1, refuted = -1;
+    for (const [idx, dist] of pingedMap(puzzle(), run().pings)) {
+      if (dist !== 1) { if (S.marks.has(idx) && refuted < 0) refuted = idx; continue; }
+      if (S.marks.has(idx)) confirmed++;
+      else if (unmarked < 0) unmarked = idx;
+    }
+    return { confirmed, unmarked, refuted };
+  }
+  const pairName = (idx) => `${STATIONS[PAIRS[idx][0]]}–${STATIONS[PAIRS[idx][1]]}`;
+
+  // The coach line over the board says what to do next, in the order a first
+  // game needs it. Reads state, writes none. Kept to one line each: at the
+  // 27-logical-px floor a wrapped coach would meet the board's first ring.
+  function coachLines() {
+    if (locked()) return null; // the solved panel under the tabs speaks for itself
+    const sel = S.selected === null ? '' : STATIONS[S.selected];
+    if (sel && S.tapMode === 'ping') return [`Ping with ${sel}: tap a second station.`, 'Tap the same station to cancel.'];
+    if (sel && S.marks.size === N - 1) return [`Unmark: tap ${sel}’s other station.`, 'Four marks used — free one first.'];
+    if (sel) return [`Mark to ${sel}: tap a second station.`, 'A marked pair taps off again.'];
+    // Only a ping proves a mark. Four marks with a guess among them are not an
+    // invitation to a check that costs 2 when wrong.
+    const { confirmed, unmarked, refuted } = proof();
+    const inMark = S.tapMode === 'mark';
+    if (refuted >= 0) return [`${pairName(refuted)}: marked, but no line.`, inMark ? 'Tap its two stations.' : 'Tap Mark, then its two stations.'];
+    if (unmarked >= 0) {
+      if (S.marks.size === N - 1) return [`${pairName(unmarked)}: proven, four marked.`, 'One is wrong — unmark one first.'];
+      return [`${pairName(unmarked)} is a proven line.`, inMark ? 'Tap its two stations.' : 'Tap Mark, then its two stations.'];
+    }
+    if (S.marks.size === N - 1) {
+      if (confirmed === N - 1) return ['All four lines found — Check.', 'Every mark has a 1-hop ping.'];
+      return [`Four marked, ${N - 1 - confirmed} unconfirmed.`, 'Sure? A wrong check costs 2.'];
+    }
+    if (S.tapMode === 'mark') return ['Mark mode: tap two stations.', 'Marks are free. Tap Ping to measure.'];
+    if (!run().pings.length) return ['Find the four hidden lines.', 'Tap two stations to ping.'];
+    return [`${S.marks.size} of ${N - 1} lines marked — ping on.`, '1 hop = a line. Deduced? Mark it.'];
+  }
+
+  function iconButton(x, y, w, h, icon, action) {
+    ctx.fillStyle = C.surface;
+    roundRect(x, y, w, h, 12); ctx.fill();
+    ctx.strokeStyle = C.accentDim; ctx.lineWidth = 2.5; roundRect(x, y, w, h, 12); ctx.stroke();
+    const cx = x + w / 2, cy = y + h / 2;
+    ctx.strokeStyle = C.text; ctx.fillStyle = C.text; ctx.lineWidth = 3; ctx.lineCap = 'round';
+    if (icon === 'home') {
+      ctx.beginPath();
+      ctx.moveTo(cx - 11, cy - 1); ctx.lineTo(cx, cy - 11); ctx.lineTo(cx + 11, cy - 1);
+      ctx.moveTo(cx - 6, cy - 4); ctx.lineTo(cx - 6, cy + 10); ctx.lineTo(cx + 6, cy + 10); ctx.lineTo(cx + 6, cy - 4);
+      ctx.stroke();
+    } else if (icon === 'prev' || icon === 'next') {
+      // Same chevron the sibling games draw for day-nav.
+      const back = icon === 'prev' ? 1 : -1;
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.moveTo(cx + 6 * back, cy - 12); ctx.lineTo(cx - 7 * back, cy); ctx.lineTo(cx + 6 * back, cy + 12);
+      ctx.stroke();
+    } else if (icon === 'hint') {
+      ctx.font = `800 30px ${FONT}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('?', cx, cy + 1);
+    } else {
+      ctx.beginPath();
+      ctx.moveTo(cx - 11, cy - 4); ctx.lineTo(cx - 6, cy - 4); ctx.lineTo(cx, cy - 10);
+      ctx.lineTo(cx, cy + 10); ctx.lineTo(cx - 6, cy + 4); ctx.lineTo(cx - 11, cy + 4);
+      ctx.closePath(); ctx.fill();
+      ctx.beginPath();
+      if (S.muted) {
+        ctx.moveTo(cx + 4, cy - 5); ctx.lineTo(cx + 12, cy + 5);
+        ctx.moveTo(cx + 12, cy - 5); ctx.lineTo(cx + 4, cy + 5);
+      } else {
+        ctx.arc(cx + 3, cy, 6, -0.9, 0.9);
+        ctx.moveTo(cx + 8, cy - 10); ctx.arc(cx + 3, cy, 11, -0.9, 0.9);
+      }
+      ctx.stroke();
+    }
+    ctx.lineCap = 'butt';
+    hitBox(x, y, w, h, action);
+  }
+
+  // Measure-first text wrapping: the helper the toast, the help panel and the
+  // title footer all size their boxes with, so nothing is drawn over its own
+  // background. The font must be set before it is called.
+  function wrapLines(text, maxW) {
+    const words = String(text).split(' ');
+    const lines = [];
+    let line = '';
+    for (const word of words) {
+      const test = line ? `${line} ${word}` : word;
+      if (ctx.measureText(test).width > maxW && line) { lines.push(line); line = word; }
+      else line = test;
+    }
+    if (line) lines.push(line);
+    return lines;
+  }
+
+  // A patch cord's droop: real cables hang between their jacks, straight graph
+  // edges do not. The sag is what makes a marked pair read as one laid cord.
+  const sagOf = (pa, pb) => Math.min(26, Math.max(10, Math.hypot(pb.x - pa.x, pb.y - pa.y) * 0.14));
+  function cablePath(pa, pb) {
+    ctx.beginPath();
+    ctx.moveTo(pa.x, pa.y);
+    ctx.quadraticCurveTo((pa.x + pb.x) / 2, (pa.y + pb.y) / 2 + sagOf(pa, pb), pb.x, pb.y);
+  }
+  const cableMid = (pa, pb) => ({ x: (pa.x + pb.x) / 2, y: (pa.y + pb.y) / 2 + sagOf(pa, pb) / 2 });
+
+  function drawTitle() {
+    drawBackdrop();
+    addHit(0, 0, W, H, 'titledefault');
+
+    iconButton(12, 14, 48, 48, 'mute', 'mute');
+    const prevOk = S.day > 1, nextOk = S.day < S.today;
+    // Only drawn when navigable — matches the sibling games' day nav, which
+    // omits the arrow entirely rather than showing it greyed out.
+    if (prevOk) iconButton(12, 84, 48, 48, 'prev', 'prevday');
+    if (nextOk) iconButton(W - 12 - 48, 84, 48, 48, 'next', 'nextday');
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = C.muted; ctx.font = `600 ${SMALL}px ${FONT}`;
+    ctx.fillText(archive() ? `Day ${S.day} · ${dayDate(S.day)}` : `Day ${S.day}`, 240, 108);
+
+    // The frame is laid out from the bottom up: footer (tall frames only), the
+    // two-button row, the one primary action, then the three line cards; the
+    // wordmark block takes whatever is left at the top (brand-system §5).
+    const secH = 56, primH = 64, cardH = 84, cardGap = 12;
+    let footerTop = H;
+    if (H >= 820) {
+      ctx.fillStyle = C.muted; ctx.font = `400 ${SMALL}px ${FONT}`;
+      const nav = wrapLines('Missed a day? The arrows above open every earlier one.', 420);
+      const brandY = H - 22;
+      ctx.fillText('Self-contained · made by an AI agent', 240, brandY);
+      nav.forEach((l, i) => ctx.fillText(l, 240, brandY - 40 - (nav.length - 1 - i) * 32));
+      footerTop = brandY - 40 - nav.length * 32 - 10;
+    }
+    const secY = footerTop - 18 - secH;
+    const primY = secY - 14 - primH;
+    const cardsBottom = primY - 16;
+    const cardTop = cardsBottom - 3 * cardH - 2 * cardGap;
+
+    const wmY = Math.max(164, Math.min(cardTop - 106, 108 + 84 + (H - 720) * 0.3));
+    ctx.fillStyle = C.accent; ctx.font = `400 64px ${DISPLAY}`;
+    ctx.fillText('Trunk Line', 240, wmY);
+    ctx.fillStyle = C.text; ctx.font = `600 28px ${FONT}`;
+    ctx.fillText('Find the four hidden lines.', 240, wmY + 50);
+    ctx.fillStyle = C.muted; ctx.font = `400 ${SMALL}px ${FONT}`;
+    ctx.fillText('Five stations. One tree. Daily.', 240, wmY + 82);
+
+    TIERS.forEach((t, tier) => {
+      const y = cardTop + tier * (cardH + cardGap), r = S.runs[tier], p = S.puzzles[tier];
+      panelFrame(40, y, 400, cardH, 14);
+      ctx.fillStyle = C.text; ctx.font = `400 34px ${DISPLAY}`; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+      ctx.fillText(t.label, 64, y + cardH * 0.36);
+      ctx.fillStyle = C.muted; ctx.font = `400 ${SMALL}px ${FONT}`;
+      ctx.fillText(`5 stations · par ${p.par}`, 64, y + cardH * 0.72);
+      ctx.textAlign = 'right';
+      if (r.solved) {
+        // The lasting mark: a star on the card of every line met or beaten,
+        // straight from the saved solve — it is there on the next visit too.
+        const over = r.solvedMoves - (r.par || p.par);
+        if (over <= 0) star(414, y + cardH * 0.34, 13, true);
+        ctx.fillStyle = over < 0 ? C.warn : over === 0 ? C.good : C.text;
+        ctx.font = `400 28px ${DISPLAY}`;
+        ctx.fillText(over < 0 ? `${-over} under` : over === 0 ? 'par' : `+${over}`, over <= 0 ? 390 : 416, y + cardH * 0.36);
+        ctx.fillStyle = C.muted; ctx.font = `400 ${SMALL}px ${FONT}`;
+        ctx.fillText(`${r.solvedMoves} pings`, 416, y + cardH * 0.72);
+      } else {
+        ctx.fillStyle = C.accent; ctx.font = `400 28px ${DISPLAY}`;
+        ctx.fillText(r.moves ? 'In progress' : 'Play', 416, y + cardH * 0.36);
+      }
+      ctx.textAlign = 'center';
+      hitBox(40, y, 400, cardH, `card${tier}`);
+    });
+
+    const allDone = solvedCount() === TIERS.length;
+    button(40, primY, 400, primH, allDone ? 'Share the day' : 'Play', allDone ? 'share' : 'play', 'primary');
+
+    if (allDone) {
+      ctx.fillStyle = S.streak > 0 ? C.good : C.muted; ctx.font = `400 28px ${DISPLAY}`;
+      ctx.fillText(S.streak > 0 ? `Streak ${S.streak}${S.bestStreak > S.streak ? ` · best ${S.bestStreak}` : ''}` : 'All three networks solved.', 240, secY - 40);
+      // Once the day is done the warm primary above is Share, so the row below
+      // keeps How to play alone: one action is never offered twice.
+      button(144, secY, 192, secH, 'How to play', 'help', 'secondary');
+    } else {
+      button(40, secY, 192, secH, 'Share', 'share', 'secondary');
+      button(248, secY, 192, secH, 'How to play', 'help', 'secondary');
+    }
+  }
+
+  function drawNetwork() {
+    const p = puzzle(), r = run();
+    const pinged = pingedMap(p, r.pings);
+    const solvedAll = locked();
+
+    for (let idx = 0; idx < PAIR_COUNT; idx++) {
+      const [a, b] = PAIRS[idx];
+      const pa = stationPoint(a), pb = stationPoint(b);
+      const isMark = S.marks.has(idx);
+      const dist = pinged.get(idx);
+      // A marked pair is a laid copper cord — glow under it, a core shaded
+      // across its width, a lit filament on top — the central object the
+      // player builds. Everything else is quieter on purpose: a ping that
+      // found no line is a dashed measurement, an untouched pair a ghost.
+      if (isMark) {
+        const refuted = dist > 1;
+        cablePath(pa, pb);
+        ctx.lineCap = 'round';
+        ctx.strokeStyle = refuted ? 'rgba(248,113,113,0.20)' : `rgba(255,176,60,${solvedAll ? 0.32 : 0.22})`;
+        ctx.lineWidth = 15; ctx.stroke();
+        const mx = (pa.x + pb.x) / 2, my = (pa.y + pb.y) / 2 + sagOf(pa, pb) / 2;
+        const dx = pb.x - pa.x, dy = pb.y - pa.y, len = Math.hypot(dx, dy) || 1;
+        const nx = -dy / len, ny = dx / len;
+        const core = ctx.createLinearGradient(mx + nx * 4, my + ny * 4, mx - nx * 4, my - ny * 4);
+        if (refuted) { core.addColorStop(0, '#fca5a5'); core.addColorStop(0.5, '#ef4444'); core.addColorStop(1, '#7f1d1d'); }
+        else { core.addColorStop(0, '#ffe3a3'); core.addColorStop(0.5, '#eda23f'); core.addColorStop(1, '#8a5316'); }
+        cablePath(pa, pb);
+        ctx.strokeStyle = core; ctx.lineWidth = 7; ctx.stroke();
+        ctx.save();
+        ctx.translate(-1.5, -2);
+        cablePath(pa, pb);
+        ctx.strokeStyle = refuted ? 'rgba(254,226,226,0.4)' : 'rgba(255,244,214,0.5)';
+        ctx.lineWidth = 2; ctx.stroke();
+        ctx.restore();
+        ctx.lineCap = 'butt';
+      } else if (dist !== undefined) {
+        cablePath(pa, pb);
+        ctx.setLineDash([10, 9]);
+        ctx.strokeStyle = C.pinged; ctx.lineWidth = 3; ctx.stroke();
+        ctx.setLineDash([]);
+      } else {
+        cablePath(pa, pb);
+        ctx.strokeStyle = 'rgba(158,214,164,0.11)'; ctx.lineWidth = 2; ctx.stroke();
+      }
+      if (dist !== undefined) {
+        const m = cableMid(pa, pb);
+        ctx.fillStyle = '#1e3a28';
+        ctx.beginPath(); ctx.arc(m.x, m.y, 17, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = C.ring; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(m.x, m.y, 17, 0, Math.PI * 2); ctx.stroke();
+        ctx.fillStyle = C.text; ctx.font = `800 ${SMALL}px ${FONT}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText(String(dist), m.x, m.y + 1);
+      }
+    }
+
+    for (let i = 0; i < N; i++) {
+      const pt = stationPoint(i);
+      const selected = S.selected === i;
+      // The socket the jack sits in: a dark ring pressed into the field.
+      ctx.strokeStyle = 'rgba(8,22,12,0.55)'; ctx.lineWidth = 6;
+      ctx.beginPath(); ctx.arc(pt.x, pt.y, 36, 0, Math.PI * 2); ctx.stroke();
+      if (selected) {
+        ctx.strokeStyle = 'rgba(250,204,21,0.65)'; ctx.lineWidth = 3;
+        ctx.beginPath(); ctx.arc(pt.x, pt.y, 33, 0, Math.PI * 2); ctx.stroke();
+      }
+      // The jack itself: brass, shaded from its own upper left, matching the
+      // light the backdrop's lamp already put there.
+      const g = ctx.createRadialGradient(pt.x - 8, pt.y - 10, 4, pt.x, pt.y, 30);
+      if (selected) { g.addColorStop(0, '#fff3b8'); g.addColorStop(0.55, C.cursor); g.addColorStop(1, '#9a6b06'); }
+      else { g.addColorStop(0, '#ffe9b0'); g.addColorStop(0.55, '#d9a34a'); g.addColorStop(1, '#7c5216'); }
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.arc(pt.x, pt.y, 30, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = selected ? '#7a5604' : '#5d3c0e'; ctx.lineWidth = 2.5;
+      ctx.beginPath(); ctx.arc(pt.x, pt.y, 30, 0, Math.PI * 2); ctx.stroke();
+      ctx.fillStyle = 'rgba(255,255,255,0.35)';
+      ctx.beginPath(); ctx.arc(pt.x - 9, pt.y - 11, 4.5, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#2a1a05'; ctx.font = `800 30px ${FONT}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(STATIONS[i], pt.x, pt.y + 1);
+      // The drawn jack stays 60 px; the tap target grows to the 68 px floor
+      // with nothing near to hit (stations sit ≥ 170 px apart).
+      hitBox(pt.x - 30, pt.y - 30, 60, 60, `station${i}`);
+    }
+
+    // The arrow-key cursor: a dashed ring, independent of `selected` (a tap's
+    // pending half-pair) — the two can land on the same or different stations.
+    if (S.mode === 'play') {
+      const cp = stationPoint(S.cursor);
+      ctx.save();
+      ctx.setLineDash([6, 6]);
+      ctx.strokeStyle = C.accent; ctx.lineWidth = 2.5;
+      ctx.beginPath(); ctx.arc(cp.x, cp.y, 41, 0, Math.PI * 2); ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  function drawPlay() {
+    drawBackdrop();
+    const p = puzzle(), r = run();
+
+    // Icon buttons 72 px apart, so their padded 68 px hit boxes never touch.
+    iconButton(12, 14, 48, 48, 'home', 'home');
+    iconButton(84, 14, 48, 48, 'mute', 'mute');
+    iconButton(156, 14, 48, 48, 'hint', 'hint');
+    ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = r.moves > p.par ? C.warn : C.text; ctx.font = `700 30px ${FONT}`;
+    ctx.fillText(`${r.moves} · par ${p.par}`, 466, 30);
+    ctx.fillStyle = C.muted; ctx.font = `600 ${SMALL}px ${FONT}`;
+    ctx.fillText(S.practice ? `Practice · ${TIERS[S.tier].label}` : `Day ${S.day} · ${TIERS[S.tier].label}`, 466, 62);
+    ctx.textAlign = 'center';
+
+    const tabY = 84, tabW = 148, tabH = 50;
+    TIERS.forEach((t, tier) => {
+      const x = 12 + tier * (tabW + 8), active = tier === S.tier;
+      ctx.fillStyle = active ? C.accent : C.card;
+      roundRect(x, tabY, tabW, tabH, 10); ctx.fill();
+      ctx.strokeStyle = active ? C.accent : C.ring; ctx.lineWidth = 2; roundRect(x, tabY, tabW, tabH, 10); ctx.stroke();
+      ctx.fillStyle = active ? C.inkWarm : C.text; ctx.font = `400 28px ${DISPLAY}`;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(t.label, x + tabW / 2 - 6, tabY + tabH / 2 + 1);
+      // A line met or beaten keeps its star on the tab too — the reward stays
+      // visible while the day is still being played out.
+      const rr = S.runs[tier];
+      if (rr.solved && rr.solvedMoves - (rr.par || S.puzzles[tier].par) <= 0) star(x + tabW - 22, tabY + tabH / 2 + 1, 10, false);
+      hitBox(x, tabY, tabW, tabH, `card${tier}`);
+    });
+
+    const btnY = 150, btnW = 148, btnH = 60, gap = 8;
+    modeSwitch(12, btnY, btnW, btnH);
+    // Check is the play screen's one primary action; it stays warm and is
+    // disabled only once the line is solved.
+    button(12 + btnW + gap, btnY, btnW, btnH, 'Check', 'check', 'primary', !locked());
+    button(12 + (btnW + gap) * 2, btnY, btnW, btnH, 'Clear', 'clear', 'secondary', !locked());
+
+    const coach = coachLines();
+    if (coach) {
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillStyle = C.accent; ctx.font = `700 28px ${FONT}`;
+      ctx.fillText(coach[0], 240, 238);
+      if (coach[1]) { ctx.fillStyle = C.text; ctx.font = `400 ${SMALL}px ${FONT}`; ctx.fillText(coach[1], 240, 268); }
+    }
+
+    ctx.save();
+    if (S.shake > 0) ctx.translate((Math.random() - 0.5) * S.shake, (Math.random() - 0.5) * S.shake);
+    drawNetwork();
+    ctx.restore();
+
+    // Neutral: the count of marks is not a verdict. Par has its colour up in the corner.
+    // The toast carries the same news while it is up, so the two never share the band.
+    if (!S.toast) {
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.font = `400 ${SMALL}px ${FONT}`;
+      ctx.fillStyle = C.muted;
+      ctx.fillText(`${r.moves} ping${r.moves === 1 ? '' : 's'} · ${S.marks.size} of ${N - 1} lines marked`, 240, HUB_CY + HUB_R + 62);
+    }
+
+    if (locked()) drawSuccess(p, r);
+  }
+
+  // Success is a panel over the space a solved line no longer needs: the Line
+  // tabs above it still switch lines, and the traced network stays in full view
+  // below it, undimmed, its four cords lit. A line met or beaten carries the
+  // star — here, on the tab above, and on the title cards of every later visit,
+  // because the solve itself is what is saved. Beating par is the louder case:
+  // the star glows, the verdict is gold, and the solve's wash ran longer.
+  function drawSuccess(p, r) {
+    const dayDone = solvedCount() === TIERS.length;
+    // Below the Line tabs with the plaque clear of their bottom edge (ARK-94:
+    // the plaque's warm pill sat 9 px over the tabs), and short enough to stop
+    // above the board's topmost cursor ring on the shortest frame (H 720: the
+    // ring tops out at ≈289, the panel bottom is 284).
+    const px = 8, pw = W - 16, py = 158, ph = 126;
+    panelFrame(px, py, pw, ph, 18);
+    addHit(px, py, pw, ph, 'successnone');
+    plaque(240, py, dayDone ? 'Day complete' : 'Line solved');
+    const over = r.solvedMoves - r.par;
+    ctx.textBaseline = 'middle';
+    if (over <= 0) {
+      star(176, py + 56, 17, true);
+      ctx.textAlign = 'left';
+      ctx.fillStyle = over < 0 ? C.warn : C.good;
+      ctx.font = `400 30px ${DISPLAY}`;
+      ctx.fillText(over < 0 ? `${-over} under par!` : 'Par — a star!', 202, py + 56);
+    } else {
+      ctx.textAlign = 'center';
+      ctx.fillStyle = C.text; ctx.font = `400 30px ${DISPLAY}`;
+      ctx.fillText(`Solved, +${over} over par`, 240, py + 56);
+    }
+    button(48, py + 78, 190, 44, dayDone ? 'Share' : 'Next line', dayDone ? 'share' : 'next', 'primary');
+    button(258, py + 78, 174, 44, 'Replay', 'replay', 'secondary');
+  }
+
+  function drawHelp() {
+    // The dim and its tap-to-close cover the whole canvas, letterbox included: a
+    // dim that stopped at the logical frame left a seam down both of its sides.
+    // A green dim, not a black one: the overlay never becomes the near-black
+    // screen the field was rebuilt to avoid.
+    const bx = -view.ox / view.scale, by = -view.oy / view.scale, bw = view.cssW / view.scale, bh = view.cssH / view.scale;
+    ctx.fillStyle = 'rgba(8,26,16,0.86)'; ctx.fillRect(bx, by, bw, bh);
+    addHit(bx, by, bw, bh, 'closehelp'); // a tap on the dim backdrop closes
+    const px = 26, pw = W - 52;
+    // The rules, said once and briefly — the full wording stays in the page's
+    // accessible label and the portal's How-to-play; this panel is the version
+    // a player mid-game will actually read at the 27-px floor.
+    ctx.font = `400 28px ${FONT}`;
+    const paras = [
+      'Five stations hide four lines — one wiring tree.',
+      'Ping two stations: you learn only the hops between them. 1 hop is a direct line, marked for you.',
+      'Mark mode: tap two stations to mark a deduced line. Free.',
+      'Four marked? Check. A miss costs 2, ping repeats are free.',
+      'Meet par — the solver’s own count — for a star. Three networks a day.',
+    ];
+    const rows = [];
+    for (const text of paras) {
+      for (const line of wrapLines(text, pw - 56)) rows.push({ line, gap: false });
+      rows.push({ line: '', gap: true });
+    }
+    rows.pop();
+    const lineH = 34, gapH = 14, headH = 58, btnH = 56;
+    const textH = rows.reduce((sum, row) => sum + (row.gap ? gapH : lineH), 0);
+    // The plaque rides the panel's top edge, so the panel keeps its half-plaque
+    // (21 px) of headroom inside the frame: at 390×844 in the portal page (H 720)
+    // the tallest help text filled H-28 and the plaque crossed the frame's top
+    // edge (ARK-94). The bottom margin is what it was: py + ph lands at H - 14.
+    // The five paragraphs wrap to 13 lines at this width (372 px) — textH 498 is
+    // what fits above Close at H 720 (text ends at 608, Close starts at 632), so
+    // new wording has to keep to that many lines.
+    const ph = Math.min(H - 52, headH + 14 + textH + 14 + btnH + 18);
+    const py = Math.max(38, (H - ph) / 2);
+    panelFrame(px, py, pw, ph, 18);
+    addHit(px, py, pw, ph, 'helpnone'); // a tap inside the panel is not a close
+    plaque(240, py, 'How to play');
+    ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = C.text; ctx.font = `400 28px ${FONT}`;
+    let ty = py + headH + 14;
+    for (const row of rows) {
+      if (!row.gap) ctx.fillText(row.line, px + 28, ty + lineH / 2);
+      ty += row.gap ? gapH : lineH;
+    }
+    // A close control — its hit box padded past the drawn pill — for anyone who
+    // does not reach for Esc or the backdrop.
+    button(px + pw - 24 - 124, py + ph - 18 - btnH, 124, btnH, 'Close', 'closehelp', 'secondary');
+  }
+
+  function drawEffects() {
+    if (S.flash > 0) {
+      if (S.spark !== null) {
+        // A connection made: a warm burst opening from the pair's midpoint while
+        // the flash decays — motion, so it only exists when motion is welcome.
+        const [a, b] = PAIRS[S.spark];
+        const pa = stationPoint(a), pb = stationPoint(b);
+        const m = cableMid(pa, pb);
+        const k = Math.min(1, Math.max(0, 1 - S.flash / 0.5));
+        const rr = 18 + k * 54;
+        const glow = ctx.createRadialGradient(m.x, m.y, 0, m.x, m.y, rr);
+        glow.addColorStop(0, `rgba(255,214,130,${Math.min(0.55, S.flash * 1.1).toFixed(3)})`);
+        glow.addColorStop(1, 'rgba(255,214,130,0)');
+        ctx.fillStyle = glow;
+        ctx.beginPath(); ctx.arc(m.x, m.y, rr, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = `rgba(255,196,84,${Math.min(0.9, S.flash * 1.8).toFixed(3)})`;
+        ctx.lineWidth = 4 - k * 2.5;
+        ctx.beginPath(); ctx.arc(m.x, m.y, rr, 0, Math.PI * 2); ctx.stroke();
+      } else {
+        // The solve's own wash: warm, and at or under par it was set brighter.
+        ctx.fillStyle = `rgba(255,205,110,${(S.flash * 0.3).toFixed(3)})`;
+        ctx.fillRect(0, 0, W, H);
+      }
+    }
+    // Not over an open help panel: the toast sat on the panel's Close button
+    // until it expired (ARK-94). The announcement has already been spoken, and
+    // the panel outranks whatever the toast had to say.
+    if (S.toast && !S.help) {
+      ctx.font = `600 ${SMALL}px ${FONT}`;
+      const lines = wrapLines(S.toast.text, W - 96);
+      const th = lines.length * 34 + 22;
+      const ty = H - 14 - th;
+      ctx.fillStyle = 'rgba(16,36,22,0.94)';
+      roundRect(24, ty, W - 48, th, 14); ctx.fill();
+      ctx.strokeStyle = 'rgba(154,230,76,0.35)'; ctx.lineWidth = 2;
+      roundRect(24, ty, W - 48, th, 14); ctx.stroke();
+      ctx.fillStyle = C.text; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      lines.forEach((l, i) => ctx.fillText(l, W / 2, ty + 19 + i * 34));
+    }
+  }
+
+  function syncOnward() {
+    if (!ONWARD) return;
+    onwardLink.hidden = !onward();
+    if (onward()) { onwardLink.href = ONWARD.path; onwardLink.textContent = `Play ${ONWARD.title}, another daily puzzle`; }
+  }
+
+  function render() {
+    hitRegions = [];
+    ctx.setTransform(view.dpr * view.scale, 0, 0, view.dpr * view.scale, view.dpr * view.ox, view.dpr * view.oy);
+    ctx.clearRect(-view.ox / view.scale, -view.oy / view.scale, view.cssW / view.scale, view.cssH / view.scale);
+    if (S.mode === 'title') drawTitle();
+    else drawPlay();
+    if (S.help) drawHelp();
+    drawEffects();
+    syncOnward();
+  }
+
+  // ---- input ----
+  // Help remembers the element that had focus when it opened and hands it back,
+  // so a keyboard player lands where they left (brand-system §5).
+  function openHelp() {
+    S.helpReturn = document.activeElement;
+    S.help = true;
+  }
+  function closeHelp() {
+    S.help = false;
+    const back = S.helpReturn;
+    S.helpReturn = null;
+    if (back && typeof back.focus === 'function') back.focus();
+  }
+
+  function handleAction(action) {
+    if (!action) return;
+    if (action === 'titledefault' || action === 'play') {
+      const first = S.runs.findIndex((r) => !r.solved);
+      startPlay(first < 0 ? 0 : first);
+      return;
+    }
+    if (action.startsWith('card')) {
+      const tier = Number(action.slice(4));
+      if (S.mode === 'title') startPlay(tier);
+      else if (S.mode === 'play') setTier(tier);
+      return;
+    }
+    if (action.startsWith('station')) {
+      selectStation(Number(action.slice(7)));
+      return;
+    }
+    switch (action) {
+      case 'prevday': stepDay(-1); return;
+      case 'nextday': stepDay(1); return;
+      case 'home': goTitle(); return;
+      case 'mute': toggleMute(); return;
+      case 'mode': if (!locked()) toggleTapMode(); return;
+      case 'modeping': if (!locked() && S.tapMode !== 'ping') toggleTapMode(); return;
+      case 'modemark': if (!locked() && S.tapMode !== 'mark') toggleTapMode(); return;
+      case 'hint': doHint(); return;
+      case 'check': doCheck(); return;
+      case 'clear': clearMarks(); return;
+      case 'share': share(); return;
+      case 'replay': startPractice(); return;
+      case 'next': goNext(); return;
+      case 'onward': goOnward(); return;
+      case 'help': if (S.help) closeHelp(); else openHelp(); return;
+      case 'closehelp': closeHelp(); return;
+      case 'helpnone': case 'successnone': return; // inside a panel: not a tap-through
+    }
+  }
+
+  canvas.addEventListener('pointerdown', (e) => {
+    invalidate();
+    canvas.focus();
+    const { x, y } = toLogical(e.clientX, e.clientY);
+    // Remember what is pressed so its button can sink onto its lip; release()
+    // and cancel() clear it. Capturing the pointer keeps the release ours even
+    // if the finger leaves the canvas.
+    S.pressed = hitTest(x, y);
+    handleAction(S.pressed);
+    if (e.pointerId !== undefined && canvas.setPointerCapture) {
+      try { canvas.setPointerCapture(e.pointerId); } catch { /* not capturable */ }
+    }
+  });
+
+  canvas.addEventListener('pointerup', (e) => {
+    invalidate();
+    S.pressed = null;
+    if (e.pointerId !== undefined && canvas.releasePointerCapture) {
+      try { canvas.releasePointerCapture(e.pointerId); } catch { /* already released */ }
+    }
+  });
+
+  canvas.addEventListener('pointercancel', () => {
+    invalidate();
+    S.pressed = null;
+  });
+
+  window.addEventListener('keydown', (e) => {
+    invalidate();
+    const { station, digit, letter } = readKey(e.code, e.key);
+    if (station >= 0) { e.preventDefault(); if (S.mode === 'play') selectStation(station); return; }
+    if (digit >= 0 && digit < TIERS.length) {
+      e.preventDefault();
+      if (S.mode === 'title') startPlay(digit);
+      else if (S.mode === 'play') setTier(digit);
+      return;
+    }
+    const dayD = dayStep(letter);
+    if (dayD && S.mode === 'title') { e.preventDefault(); stepDay(dayD); return; }
+    if (S.mode === 'play' && (letter === 'ArrowRight' || letter === 'ArrowDown' || letter === 'ArrowLeft' || letter === 'ArrowUp')) {
+      e.preventDefault();
+      moveCursor(letter === 'ArrowRight' || letter === 'ArrowDown' ? 1 : -1);
+      return;
+    }
+    if (S.mode === 'play' && letter === 'Enter') { e.preventDefault(); selectStation(S.cursor); return; }
+    switch (letter) {
+      case ' ':
+        e.preventDefault();
+        if (S.help) { closeHelp(); return; }
+        if (S.mode === 'title') handleAction('titledefault');
+        else if (S.mode === 'play' && !locked()) toggleTapMode();
+        return;
+      case 'm': if (S.mode === 'play' && !locked()) toggleTapMode(); return;
+      case 'i': if (S.mode === 'play') doHint(); return;
+      case 'k': if (S.mode === 'play') doCheck(); return;
+      case 'x': if (S.mode === 'play') clearMarks(); return;
+      case 'c': share(); return;
+      case 'l': if (S.mode === 'play') announce(describeState()); return;
+      case 'h': if (S.help) closeHelp(); else openHelp(); sfx.click(); return;
+      case 'r': if (S.mode === 'play') startPractice(); return;
+      case 'n': if (S.mode === 'play') goNext(); return;
+      case 'Escape':
+        if (S.help) { closeHelp(); return; }
+        if (S.mode === 'play') goTitle();
+        return;
+    }
+  });
+
+  controls.addEventListener('click', (e) => {
+    invalidate();
+    const btn = e.target.closest('button,a');
+    if (!btn) return;
+    const act = btn.dataset.act;
+    if (!act) return;
+    if (act === 'board') { announce(describeState()); return; }
+    if (act === 'help') { if (S.help) closeHelp(); else openHelp(); return; }
+    handleAction(act);
+  });
+
+  window.addEventListener('resize', resize);
+  // A tab shown again is drawn again; a hidden one advances nothing (update()).
+  document.addEventListener('visibilitychange', () => {
+    invalidate();
+    S.hidden = document.hidden;
+    if (S.hidden && audio) audio.suspend().catch(() => {});
+  });
+
+  // Another tab of this game saved something: take it in, so neither tab
+  // overwrites the other's solved puzzles.
+  window.addEventListener('storage', (event) => {
+    invalidate();
+    if (event.key === STORE && S.runs.length) absorb(readStore());
+  });
+
+  // ---- display face ----
+  // The portal's Righteous, embedded as its exact bytes: a game is one
+  // self-contained document and may make no request of its own, so the font
+  // travels inside the file and is decoded into a FontFace (a `data:` URL would
+  // be blocked by the /play/* CSP; the bytes are the same file the portal
+  // self-hosts at /fonts/righteous-latin-400-normal.woff2). Until it is ready the
+  // labels fall back to the system stack; frame() redraws once when it loads.
+  const FONT_WOFF2 = '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';
+  let displayFace = null, displayFaceSettled = false;
+  function installDisplayFont() {
+    try {
+      const bin = atob(FONT_WOFF2);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      displayFace = new FontFace(DISPLAY_FONT, bytes.buffer);
+      document.fonts.add(displayFace);
+      displayFace.load().catch(() => {}); // a font that will not load just falls back
+    } catch { displayFace = null; }
+  }
+
+  // ---- run ----
+  // A still screen — the title, a board nobody has touched, the help overlay —
+  // used to be redrawn sixty times a second. Now it is drawn when something
+  // changed, the rule the other dailies follow: every listener and timer that can
+  // change the picture calls invalidate() before anything else can return, and the
+  // loop owns what no event announces — a running animation (the flash of a solve,
+  // the shake of a wrong check) plus one frame after it ends, and the frame a
+  // still toast expires on (update() invalidates there). A missed invalidate is a
+  // frozen game.
+  //
+  // Trunk Line has no ambient motion: the old clock field was advanced but read by
+  // nothing, and is gone. Every write of state now lives in update(dt), which runs
+  // every frame and stands still while the tab is hidden or the picture is posed.
+  let dirty = true, wasAnimating = false;
+  const invalidate = () => { dirty = true; };
+  // Only what moves on screen: the flash and the shake. A toast never moves — it
+  // is drawn on the frame it lands and again on the frame update() drops it; the
+  // repaints while it sat still were the whole of the ×4 frame cost measured at
+  // acceptance (ARK-94). A photograph holds still.
+  const animating = () => {
+    if (PICTURE) return false;
+    return S.flash > 0 || S.shake > 0;
+  };
+
+  let lastT = 0;
+  function frame(now) {
+    // Booked before anything that can throw: one bad frame must not stop every frame
+    // after it and leave the game frozen on its last picture (Pair Flip, 48ad915).
+    requestAnimationFrame(frame);
+    const dt = Math.min(0.05, lastT ? (now - lastT) / 1000 : 0);
+    lastT = now;
+    update(dt);
+    // The display face loads a hair after the first frame: redraw once when it
+    // has settled (loaded or failed), so labels are never left in the fallback.
+    if (displayFace && !displayFaceSettled && displayFace.status !== 'unloaded' && displayFace.status !== 'loading') {
+      displayFaceSettled = true;
+      dirty = true;
+    }
+    if (!PICTURE) {
+      S.dayCheck -= dt;
+      if (S.dayCheck <= 0) { S.dayCheck = 5; checkDay(); }
+    }
+    const live = animating();
+    // `wasAnimating` buys one more frame after the last one ends, so the screen
+    // never keeps a half-finished animation as its final picture.
+    if (dirty || live || wasAnimating) {
+      dirty = false;
+      render();
+      // The generator waits for this before it photographs (POSED_FLAG in
+      // picture-flag.mjs) — but only once the display face has settled, so a
+      // card is never shot with the fallback lettering.
+      if (PICTURE && (!displayFace || displayFaceSettled)) window.__arkaiPosed = true;
+    }
+    wasAnimating = live;
+  }
+
+  // A canvas whose backing store the browser dropped comes back blank, and so
+  // may the backdrop's own canvas: dropping its key paints it again (ARK-77).
+  canvas.addEventListener('contextrestored', () => {
+    invalidate();
+    backdropKey = '';
+  });
+  installDisplayFont();
+  resize();
+  if (PICTURE) posePicture(); else {
+    loadDay(dayFromDateParam(DATE_RAW) ?? dayNumber(new Date()));
+    // The first visit explains the game once, over the title. Every later visit
+    // goes straight to the networks — the store exists from the first ping on —
+    // and the rules stay one tap away on How to play (H). No new key: the save
+    // itself is the "has been here before" flag.
+    if (storage.get(STORE) === null) openHelp();
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

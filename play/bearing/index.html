@@ -1,0 +1,1800 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="color-scheme" content="light">
+<title>Bearing — Arkai</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; }
+  body { -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; background: radial-gradient(130% 110% at 82% 24%, #ffd97e 0%, #ffb627 16%, rgba(255,182,39,0) 46%), linear-gradient(180deg, #3c4a8a 0%, #6d7fc9 18%, #ff9a6b 42%, #ffb627 58%, #ffd88a 66%, #19b7b0 82%, #135a75 100%); }
+  canvas { display: block; width: 100vw; height: 100vh; height: 100dvh; touch-action: none; outline: none; cursor: pointer; }
+  canvas:focus-visible { outline: 2px solid rgba(240, 196, 99, 0.8); outline-offset: -2px; }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  #controls:focus-within { position: fixed; left: 8px; right: 8px; bottom: 8px; width: auto; height: auto; clip: auto; white-space: normal; display: flex; flex-wrap: wrap; gap: 6px; padding: 8px; border-radius: 12px; background: #fff7e6; border: 1px solid #c9922e; }
+  #controls button, #controls a { min-height: 44px; box-sizing: border-box; display: inline-flex; align-items: center; text-decoration: none; padding: 0 12px; border-radius: 10px; border: 1px solid #c9922e; background: #fff2d8; color: #16324f; font: 600 16px system-ui, sans-serif; }
+  #controls a[hidden] { display: none; }
+  #controls button:focus, #controls a:focus { outline: 2px solid #c9922e; }
+  #copybox { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(22, 50, 79, 0.72); }
+  #copybox.open { display: flex; }
+  #copybox .card { width: min(92vw, 420px); box-sizing: border-box; padding: 18px; border-radius: 16px; background: #fff7e6; border: 1px solid #c9922e; color: #16324f; }
+  #copybox p { margin: 0 0 10px; font-size: 16px; line-height: 1.4; }
+  #copybox textarea { width: 100%; height: 100px; box-sizing: border-box; padding: 10px; border-radius: 10px; border: 1px solid #c9922e; background: #fffdf5; color: #16324f; font: 16px/1.45 ui-monospace, Menlo, Consolas, monospace; resize: none; -webkit-user-select: text; user-select: text; }
+  #copybox button { margin-top: 12px; width: 100%; height: 44px; border: 0; border-radius: 10px; background: #ff6a4d; color: #16324f; font-weight: 700; font-size: 16px; cursor: pointer; }
+</style>
+</head>
+<body>
+<canvas id="game" tabindex="0" role="application" aria-label="Bearing, a daily direction-finding puzzle. Two or three sound sources sit around a 16-point compass. Rotate your heading and listen: each source's left-right pull matches two possible bearings, mirrored across your heading, until a second listen from another heading narrows it to one. Left and right arrow keys rotate, Space listens, mark a compass point by tapping it, K checks, X clears your marks, L describes the puzzle, R replays a solved puzzle for practice, H shows the rules. Comma and period open the previous or next day. Press Tab for buttons."></canvas>
+<div id="status" class="sr" aria-live="polite"></div>
+<div id="controls" class="sr" role="group" aria-label="Game controls">
+  <button type="button" data-act="rotateccw">Rotate heading left</button>
+  <button type="button" data-act="rotatecw">Rotate heading right</button>
+  <button type="button" data-act="listen">Listen from the current heading</button>
+  <button type="button" data-act="check">Check your marks</button>
+  <button type="button" data-act="clear">Clear your marks</button>
+  <button type="button" data-act="describe">Describe the puzzle</button>
+  <button type="button" data-act="replay">Replay a solved puzzle for practice</button>
+  <button type="button" data-act="help">Rules</button>
+  <button type="button" data-act="share">Share result</button>
+  <a id="onward" href="#" target="_top" hidden>Play the next daily puzzle</a>
+  <button type="button" data-act="card0">Two-source puzzle</button>
+  <button type="button" data-act="card1">Three-source puzzle</button>
+  <button type="button" data-act="mute">Sound on or off</button>
+  <button type="button" data-act="home">Title screen</button>
+  <button type="button" data-act="prevday">Previous day</button>
+  <button type="button" data-act="nextday">Next day</button>
+  <button type="button" data-act="opengate">Open the sound check</button>
+  <button type="button" data-act="gateleft">Sound check: I heard it on the left</button>
+  <button type="button" data-act="gateright">Sound check: I heard it on the right</button>
+  <button type="button" data-act="gatetone">Sound check: play the tone again</button>
+  <button type="button" data-act="gateskip">Sound check: continue without it</button>
+</div>
+<div id="copybox" role="dialog" aria-modal="true" aria-labelledby="copytitle">
+  <div class="card">
+    <p id="copytitle">Your browser would not copy by itself. Select the text below, copy it, and paste it anywhere.</p>
+    <textarea id="copytext" readonly></textarea>
+    <button id="copyclose" type="button">Done</button>
+  </div>
+</div>
+<script>
+(() => {
+  'use strict';
+
+  // ---- puzzle core begin ----
+  // Everything between the two markers is pure: no DOM, no clock, no storage,
+  // no audio. The one promise a daily puzzle makes is that puzzle #N hides the
+  // same bearings for everyone, forever. A change here that renumbers or
+  // reshapes old days breaks every result anyone has already shared.
+
+  const GAME_SEED = 0xbea4;
+  const EPOCH_UTC = Date.UTC(2026, 8, 21);
+  const DAY_MS = 86400000;
+  const FREEZE_COOLDOWN = 30;
+  const DIAL = 16; // 22.5° per stop, a real compass rose vocabulary
+  const MIN_SEP = 4; // 90° minimum between any two sources — generous margin (IDEA-BACKLOG.md 2026-09-21)
+  const POINTS = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];
+
+  // Fixed per tier, not searched per puzzle: the offline simulation (session
+  // #246 continuation, IDEA-BACKLOG.md) found separation and dial size barely
+  // move the solve rate, and any valid placement is triangulated by the same
+  // two-heading strategy in at most two listens under perfect listening. The
+  // slack above that theoretical minimum is the simulation's own evidence-based
+  // answer to the one thing it could not resolve: real per-listen perceptual
+  // error on real headphones. Extra listens are insurance, not a penalty for
+  // making them — no hard cap, only a cost.
+  const TIERS = [
+    { name: 'I', label: 'Two', k: 2, par: 3 },
+    { name: 'II', label: 'Three', k: 3, par: 5 },
+  ];
+  const MAX_ATTEMPTS = 1500;
+
+  // mulberry32 over an FNV-1a mix of the inputs: integer arithmetic only, so
+  // every engine draws the same puzzle from the same day.
+  function seeded(...parts) {
+    let h = 2166136261 >>> 0;
+    for (const part of parts) {
+      h = Math.imul(h ^ (part & 0xffff), 16777619) >>> 0;
+      h = Math.imul(h ^ (part >>> 16), 16777619) >>> 0;
+    }
+    let a = h | 0;
+    return () => {
+      a = (a + 0x6d2b79f5) | 0;
+      let t = a;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  const norm16 = (n) => ((n % DIAL) + DIAL) % DIAL;
+  const circDist = (a, b) => { const d = Math.abs(a - b) % DIAL; return Math.min(d, DIAL - d); };
+
+  /**
+   * The two compass stops a single listen cannot tell apart: the true bearing,
+   * and its mirror across the axis perpendicular to `heading` (the classic
+   * front-back "cone of confusion" of plain interaural cues — a source ahead of
+   * you and its mirror behind you pull the same way). `bearing` is only ever
+   * the puzzle's own hidden value here, exactly as `responsesFor` in this
+   * portal's other daily puzzles computes an honest reading from the truth.
+   */
+  function candidatesFor(bearing, heading) {
+    const rel = norm16(bearing - heading);
+    const mirrorRel = norm16(DIAL / 2 - rel);
+    return [bearing, norm16(heading + mirrorRel)];
+  }
+
+  /**
+   * `k` distinct stops, every pair at least `minSep` apart. Rejection sampling
+   * that restarts the whole placement on a dead end instead of looping inside
+   * it — the exact bug the offline simulation hit and fixed (IDEA-BACKLOG.md,
+   * session #246 continuation): a partial placement can paint itself into a
+   * corner where no stop satisfies the remaining separation, and looping for a
+   * next candidate inside that corner never terminates.
+   */
+  function placeSources(rand, k, minSep) {
+    for (let attempt = 0; attempt < 200; attempt++) {
+      const stops = [];
+      let ok = true;
+      for (let i = 0; i < k; i++) {
+        let found = -1;
+        for (let tries = 0; tries < 64; tries++) {
+          const c = Math.floor(rand() * DIAL);
+          if (stops.every((s) => circDist(s, c) >= minSep)) { found = c; break; }
+        }
+        if (found < 0) { ok = false; break; }
+        stops.push(found);
+      }
+      if (ok) return stops.sort((a, b) => a - b);
+    }
+    return null;
+  }
+
+  /** A placement that always satisfies MIN_SEP, for a day the generator cannot fill. */
+  function fallbackBearings(k) {
+    return k === 2 ? [4, 12] : [0, 6, 11];
+  }
+
+  /** The puzzle for a day and tier. Same arguments, same bearings, on any machine. */
+  function makePuzzle(day, tier) {
+    const spec = TIERS[tier];
+    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+      const rand = seeded(GAME_SEED, day, tier, attempt);
+      const bearings = placeSources(rand, spec.k, MIN_SEP);
+      if (bearings) return { k: spec.k, par: spec.par, bearings, day, tier };
+    }
+    // Tens of thousands of days were generated in testing (see the offline
+    // simulation write-up) and none got here; a fixed placement beats a frozen tab.
+    return { k: spec.k, par: spec.par, bearings: fallbackBearings(spec.k), day, tier };
+  }
+
+  /** True only when the marks are exactly the hidden bearings — nothing else survives every listen. */
+  function judge(puzzle, marks) {
+    if (marks.length !== puzzle.k) return { ok: false, reason: 'count' };
+    const want = new Set(puzzle.bearings);
+    return { ok: marks.every((m) => want.has(m)) };
+  }
+
+  // A history token is a heard heading (0-15), or a failed check: a bare 'x'.
+  // Joined by dots, the same convention Echo Sounding uses for its ping history.
+  const tokensOf = (text) => (typeof text === 'string' && text ? text.split('.') : []);
+  function costOf(text) {
+    return tokensOf(text).reduce((sum, token) => sum + (token[0] === 'x' ? 2 : 1), 0);
+  }
+
+  /** What a stored listen history put on screen. Stops at the first entry the game could not have written. */
+  function replay(text) {
+    const listens = [];
+    const kept = [];
+    for (const token of tokensOf(text)) {
+      const m = /^(x?)(\d{0,2})$/.exec(token);
+      if (!m || (!m[1] && !m[2])) break; // only a corrupt store gets here
+      if (m[2]) {
+        const heading = Number(m[2]);
+        if (heading >= DIAL) break;
+        listens.push(heading);
+      }
+      kept.push(token);
+    }
+    return { listens, moves: costOf(kept.join('.')), inputs: kept.join('.') };
+  }
+
+  const marksOf = (text) => (typeof text === 'string' && text ? text.split('.').map(Number).filter((n) => Number.isInteger(n) && n >= 0 && n < DIAL) : []);
+
+  // Movement is positional: arrows, and WASD by where the keys sit, so ZQSD
+  // rotates on AZERTY. Commands are read by the printed letter, so Z undoes on
+  // QWERTZ; a non-Latin letter falls back to the Latin one on the same key.
+  const KEY_DIRS = { ArrowUp: 0, KeyW: 0, ArrowRight: 1, KeyD: 1, ArrowDown: 2, KeyS: 2, ArrowLeft: 3, KeyA: 3 };
+  const ARROW_DIRS = { ArrowUp: 0, ArrowRight: 1, ArrowDown: 2, ArrowLeft: 3 };
+  const PUNCT_KEYS = { Comma: ',', Period: '.' };
+  const own = (table, name) => Object.prototype.hasOwnProperty.call(table, name);
+
+  function readKey(rawCode, rawKey) {
+    const code = String(rawCode || ''), key = String(rawKey || '');
+    let dir = own(ARROW_DIRS, key) ? ARROW_DIRS[key] : own(KEY_DIRS, code) ? KEY_DIRS[code] : -1;
+    const digit = /^Digit[12]$/.test(code) || (/^Numpad[12]$/.test(code) && /^[12]$/.test(key)) ? Number(code.slice(-1)) - 1 : -1;
+    let letter = key.length === 1 ? key.toLowerCase() : key;
+    if (/^[\p{L}\p{M}]+$/u.test(key) && /[^\p{Script=Latin}\p{Script=Inherited}\p{Script=Common}]/u.test(key)) {
+      if (/^Key[A-Z]$/.test(code)) letter = code.slice(3).toLowerCase();
+      else if (own(PUNCT_KEYS, code)) letter = PUNCT_KEYS[code];
+    }
+    return { dir, digit, letter: dir >= 0 ? '' : letter };
+  }
+
+  function dayStep(letter) {
+    if (letter === ',' || letter === '<' || letter === '[') return -1;
+    if (letter === '.' || letter === '>' || letter === ']') return 1;
+    return 0;
+  }
+
+  function dayNumber(date) {
+    const utc = Date.UTC(date.getFullYear(), date.getMonth(), date.getDate());
+    return Math.max(1, Math.floor((utc - EPOCH_UTC) / DAY_MS) + 1);
+  }
+
+  /**
+   * The day named by the archive picker's `?date=YYYY-MM-DD` (see
+   * /archive/ and frame-forward.js), or null if the param is absent,
+   * malformed, or not a real calendar date. y/m/d are treated as the
+   * visitor's own local calendar date, exactly like `dayNumber(new Date())`
+   * is at boot — reused via a plain date-like object instead of a real
+   * `new Date(y, mo, d)`, which the puzzle core's own purity test below
+   * forbids inside this block. Needs no upper/lower bound of its own: a
+   * date before day one or after today comes out exactly like never having
+   * loaded the param, because `loadDay` already clamps both ends for
+   * prevday/nextday.
+   */
+  function daysInMonth(y, mo) {
+    if (mo === 1) return y % 4 === 0 && (y % 100 !== 0 || y % 400 === 0) ? 29 : 28;
+    return [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][mo];
+  }
+  function dayFromDateParam(raw) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw || '');
+    if (!m) return null;
+    const y = Number(m[1]), mo = Number(m[2]) - 1, d = Number(m[3]);
+    if (mo < 0 || mo > 11 || d < 1 || d > daysInMonth(y, mo)) return null;
+    return dayNumber({ getFullYear: () => y, getMonth: () => mo, getDate: () => d });
+  }
+
+  function streakAfter(streak, lastFull, day, today, freezeAvailable) {
+    if (day !== today || lastFull >= day) return null;
+    if (lastFull === day - 1) return { streak: streak + 1, lastFull: day };
+    if (freezeAvailable && lastFull > 0 && lastFull === day - 2) return { streak: streak + 1, lastFull: day, freezeUsed: true };
+    return { streak: 1, lastFull: day };
+  }
+
+  // day 2 can only reach the freeze branch when lastFull is the never-played sentinel (0), never a real missed day; every stored freezeUsedDay === 2 is that bug's leftover, so it is safe to always clear it on load.
+  function cleanFreezeUsedDay(freezeUsedDay) {
+    return freezeUsedDay === 2 ? 0 : freezeUsedDay;
+  }
+
+  function titleDay(day, date, past) {
+    return past ? `Day ${day} · ${date}` : `Day ${day} · a new puzzle every day`;
+  }
+
+  function shareMark(result, par) {
+    if (!result) return '⬛';
+    const over = result - par;
+    if (over < 0) return '⭐' + over;
+    if (over === 0) return '⭐';
+    if (over <= 2) return '🟢+' + over;
+    if (over <= 6) return '🟡+' + over;
+    return '🔴+' + over;
+  }
+
+  function parNote(moves, par) {
+    const over = moves - par;
+    return over < 0 ? `★ ${-over} under par` : over === 0 ? '★ par' : `par ${par}, +${over}`;
+  }
+
+  function readOnward(fragment, self) {
+    const params = new URLSearchParams(String(fragment || '').replace(/^#/, ''));
+    const slug = params.get('next') || '', title = params.get('title') || '';
+    if (slug === self || !/^[a-z0-9][a-z0-9-]{0,39}$/.test(slug) || !/^[A-Za-z0-9][A-Za-z0-9 '’-]{0,23}$/.test(title)) return null;
+    return { slug, title, path: `/games/${slug}/` };
+  }
+
+  /**
+   * One day's saved results, merged with what this tab holds. Two tabs of the
+   * same game write to one store; the later write must not unsolve a puzzle
+   * the other tab solved, or lower a count the player already spent. Entries
+   * are { i: listen/check history, g: the player's marks, m: spent, s: spent
+   * at the solve or 0, p: par at the solve }. `mineInputs`/`mineMarks` say, per
+   * tier, whether this tab changed that field and has not saved yet; null (as
+   * the front page's own reader passes) means "current always wins".
+   */
+  function mergeDay(saved, current, mineInputs, mineMarks) {
+    return current.map((cur, tier) => {
+      const old = (Array.isArray(saved) && saved[tier]) || {};
+      const m = Math.max(Number(old.m) || 0, cur.m);
+      const oldPath = typeof old.i === 'string' ? old.i : null;
+      const oldMarks = typeof old.g === 'string' ? old.g : '';
+      if (Number(old.s) > 0) return { i: oldPath ?? cur.i, g: oldPath === null ? cur.g : oldMarks, m, s: Number(old.s), p: Number(old.p) || 0 };
+      const oursInputs = !mineInputs || mineInputs[tier] || oldPath === null;
+      const oursMarks = !mineMarks || mineMarks[tier] || oldPath === null;
+      return { i: oursInputs ? cur.i : oldPath, g: oursMarks ? cur.g : oldMarks, m, s: cur.s, p: cur.p };
+    });
+  }
+
+  const core = {
+    GAME_SEED, EPOCH_UTC, DAY_MS, FREEZE_COOLDOWN, DIAL, MIN_SEP, POINTS, TIERS, MAX_ATTEMPTS,
+    seeded, norm16, circDist, candidatesFor, placeSources, fallbackBearings, makePuzzle,
+    judge, costOf, replay, marksOf, mergeDay, readKey, dayStep, dayNumber, dayFromDateParam, streakAfter, shareMark, parNote, titleDay, readOnward, cleanFreezeUsedDay,
+  };
+  // ---- puzzle core end ----
+
+  // ---- layout & state ----
+  // 3:4 like the portal frame that carries it (ARK-88, D-083/D-085): a 480×720
+  // canvas letterboxed inside that frame scaled by only ~0.65 on a 390×844
+  // phone, where 480×640 fills it edge to edge at ~0.73 (and ~0.50 on 844×390).
+  // Text is 24+ logical px (~17.5 CSS px portrait, ~12 landscape) and drawn
+  // targets 62+ logical px (~45 CSS px portrait).
+  const W = 480, H = 640;
+  const FONT = 'system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif';
+  const SLUG = 'bearing';
+  const STORE = 'arkai:bearing:v1', STORE_MUTE = 'arkai:bearing:muted', STORE_GATE = 'arkai:bearing:gateok';
+  const SHARE_URL = 'https:' + '//arkai.win/games/bearing/?ref=share';
+  const RING_CX = 240, RING_CY = 290, RING_R = 104;
+
+  const C = {
+    bg: '#fff7e6', card: '#fff2d8',
+    ring: '#c9922e', ringDim: '#c9a45c',
+    accent: '#ff6a4d', accentDim: '#b34a34', cursor: '#9a6412', // the amber mark, darkened to srcInk amber: #ffb020 sat at 1.5:1 on the lit desk (ARK-116 P0)
+    text: '#16324f', muted: '#4c6a80', good: '#0a6b60', warn: '#9a5b00', bad: '#e8453c',
+    srcInk: ['#c0392b', '#0a7a72', '#9a6412'],
+    navy: '#16324f', brass: '#c9922e', brassBright: '#f0c463', brassInk: '#8a5f1a', flame: '#ffb020',
+  };
+
+  const stopAngle = (stop) => (stop * Math.PI) / (DIAL / 2) - Math.PI / 2;
+  const stopPoint = (stop, r) => ({ x: RING_CX + r * Math.cos(stopAngle(stop)), y: RING_CY + r * Math.sin(stopAngle(stop)) });
+
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const statusEl = document.getElementById('status');
+  const controls = document.getElementById('controls');
+  const copyBox = document.getElementById('copybox');
+  const copyText = document.getElementById('copytext');
+  const copyClose = document.getElementById('copyclose');
+  const coarseQuery = window.matchMedia ? window.matchMedia('(pointer: coarse)') : null;
+  const calmQuery = window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : null;
+  const touch = () => !!(coarseQuery && coarseQuery.matches);
+  const calm = () => !!(calmQuery && calmQuery.matches);
+
+  // Set by the portal's picture generator (site/scripts/lib/picture-flag.mjs).
+  const PICTURE = window.__arkaiPicture === true;
+
+  const storage = {
+    get(key) { if (PICTURE) return null; try { return localStorage.getItem(key); } catch { return null; } },
+    set(key, value) { if (PICTURE) return true; try { localStorage.setItem(key, value); return true; } catch { return false; } },
+  };
+
+  const S = {
+    mode: 'title',
+    day: 1, today: 1,
+    puzzles: [], runs: [], tier: 0, newDay: false,
+    heading: 0, marks: new Set(),
+    practice: false, practiceRun: null,
+    help: false,
+    streak: 0, bestStreak: 0, lastFull: 0, freezeUsedDay: 0, storageWarned: false,
+    muted: storage.get(STORE_MUTE) === '1',
+    gatePassed: storage.get(STORE_GATE) === '1', gateSide: null, gateAttempts: 0,
+    listening: false, listenStep: -1,
+    dayCheck: 5, flash: 0, shake: 0, toast: null,
+    hidden: false,
+  };
+  const started = new Set();
+
+  // ---- portal events (same-origin parent only) ----
+  const emit = (event, data) => {
+    if (PICTURE) return; // a photograph is not a play session
+    try {
+      if (window.parent && window.parent !== window) {
+        window.parent.postMessage({ type: 'game-event', event, data: data || {} }, location.origin);
+      }
+    } catch { /* not embedded */ }
+  };
+  // A throw nobody caught is a bug a player has just met, and until now only they knew.
+  // Said once per page: a frame that throws sixty times a second is one fact, not sixty.
+  // Only this page's own script counts (an extension's error is not the game breaking),
+  // and the line travels with it: this file ships byte for byte, so the line is exact.
+  let crashed = false;
+  window.addEventListener('error', (e) => {
+    if (crashed || !String(e.filename).startsWith(location.origin + location.pathname)) return;
+    crashed = true;
+    emit('crash', { line: e.lineno });
+  });
+  const reportFocus = () => emit('focus', { day: S.day, tier: S.tier + 1 });
+
+  let announceTimer = 0, pending = '';
+  const announce = (message) => {
+    pending = pending ? `${pending} ${message}` : message;
+    statusEl.textContent = '';
+    clearTimeout(announceTimer);
+    announceTimer = setTimeout(() => { statusEl.textContent = pending; pending = ''; }, 60);
+  };
+
+  // ---- sound ----
+  let audio = null;
+  const ensureAudio = () => {
+    if (S.muted) return;
+    if (!audio) {
+      try { const Ctx = window.AudioContext || window.webkitAudioContext; if (Ctx) audio = new Ctx(); } catch { audio = null; }
+    }
+    if (audio && audio.state === 'suspended') audio.resume().catch(() => {});
+  };
+  const tone = (freq, dur = 0.08, type = 'sine', vol = 0.04, delay = 0, slide = 0) => {
+    if (S.muted || !audio || audio.state !== 'running') return;
+    const t = audio.currentTime + delay;
+    const osc = audio.createOscillator(), gain = audio.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, t);
+    if (slide) osc.frequency.exponentialRampToValueAtTime(Math.max(40, freq + slide), t + dur);
+    gain.gain.setValueAtTime(0, t);
+    gain.gain.linearRampToValueAtTime(vol, t + 0.008);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    osc.connect(gain); gain.connect(audio.destination);
+    osc.start(t); osc.stop(t + dur + 0.02);
+  };
+  const sfx = {
+    mark: () => tone(520, 0.05, 'square', 0.03),
+    unmark: () => tone(340, 0.05, 'square', 0.025),
+    bump: () => tone(130, 0.08, 'square', 0.025),
+    fail: () => tone(300, 0.3, 'sawtooth', 0.035, 0, -180),
+    win: () => [523, 659, 784, 1047].forEach((f, i) => tone(f, 0.16, 'triangle', 0.045, i * 0.09)),
+    click: () => tone(700, 0.035, 'sine', 0.025),
+    mode: () => tone(600, 0.05, 'triangle', 0.03, 0, 80),
+  };
+
+  // The one channel that carries real spatial information: StereoPannerNode for
+  // amplitude panning, plus a manual interaural-time-difference pair (split the
+  // panned stereo signal, delay whichever channel is on the far side of the
+  // source up to ~0.65ms). A hard pan value alone is ILD-only and a strictly
+  // weaker cue than real hearing; the Bearing spec (IDEA-BACKLOG.md) calls for
+  // both explicitly so a stereo-headphone listener gets an honest cue, not a
+  // synthetic shortcut.
+  const MAX_ITD = 0.00065;
+  function spatialTone(pan, atTime, freq = 440, dur = 0.55) {
+    if (S.muted || !audio || audio.state !== 'running') return null;
+    const t = atTime, p = Math.max(-1, Math.min(1, pan));
+    const osc = audio.createOscillator(), gain = audio.createGain(), cut = audio.createGain(), panner = audio.createStereoPanner();
+    const splitter = audio.createChannelSplitter(2), merger = audio.createChannelMerger(2);
+    const delayL = audio.createDelay(0.01), delayR = audio.createDelay(0.01);
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(freq, t);
+    gain.gain.setValueAtTime(0, t);
+    gain.gain.linearRampToValueAtTime(0.09, t + 0.03);
+    gain.gain.setValueAtTime(0.09, t + Math.max(0.03, dur - 0.1));
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    panner.pan.setValueAtTime(p, t);
+    delayL.delayTime.setValueAtTime(Math.max(0, p) * MAX_ITD, t);
+    delayR.delayTime.setValueAtTime(Math.max(0, -p) * MAX_ITD, t);
+    // The envelope lives on `gain`; `cut` is a second stage at a fixed unity that
+    // nothing automates, so silenceListen can fade it without reading gain.value —
+    // which is still the GainNode default of 1 in the very render block a tone
+    // starts in, and would fade in from 0.09 over an envelope of 0 (ARK-37). It is the
+    // voice's last stage, after the ITD delay lines, so zeroing it silences what they
+    // still hold of the tone too (ARK-38).
+    osc.connect(gain); gain.connect(panner); panner.connect(splitter);
+    splitter.connect(delayL, 0); splitter.connect(delayR, 1);
+    delayL.connect(merger, 0, 0); delayR.connect(merger, 0, 1);
+    merger.connect(cut); cut.connect(audio.destination);
+    osc.start(t); osc.stop(t + dur + 0.03);
+    // Returned so a listen can be silenced before that stop time (silenceListen).
+    return { osc, gain, cut, start: t };
+  }
+
+  // ---- canvas letterbox ----
+  let view = { dpr: 1, cssW: W, cssH: H, scale: 1, ox: 0, oy: 0 };
+  function resize() {
+    invalidate(); // a canvas given a new size is blank until it is drawn again
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const cssW = Math.max(1, canvas.clientWidth), cssH = Math.max(1, canvas.clientHeight);
+    canvas.width = Math.round(cssW * dpr);
+    canvas.height = Math.round(cssH * dpr);
+    const scale = Math.min(cssW / W, cssH / H);
+    view = { dpr, cssW, cssH, scale, ox: (cssW - W * scale) / 2, oy: (cssH - H * scale) / 2 };
+  }
+  function toLogical(clientX, clientY) {
+    const rect = canvas.getBoundingClientRect();
+    return { x: (clientX - rect.left - view.ox) / view.scale, y: (clientY - rect.top - view.oy) / view.scale };
+  }
+
+  // ---- helpers ----
+  const puzzle = () => S.puzzles[S.tier];
+  const run = () => (S.practice ? S.practiceRun : S.runs[S.tier]);
+  const solvedCount = () => S.runs.filter((r) => r.solved).length;
+  const locked = () => run().solved && !S.practice;
+  const archive = () => S.day < S.today;
+  const dayDate = (day) => new Date(EPOCH_UTC + (day - 1) * DAY_MS).toLocaleDateString('en-US', { month: 'long', day: 'numeric', timeZone: 'UTC' });
+  const ONWARD = !PICTURE && /^https?:$/.test(location.protocol) ? readOnward(location.hash, SLUG) : null;
+  // A specific day named by the archive picker on /archive/, forwarded into
+  // this iframe the same way a friend code is (frame-forward.js). Read once
+  // at boot; dayFromDateParam already returns null for anything malformed.
+  const DATE_RAW = !PICTURE && /^https?:$/.test(location.protocol) ? new URLSearchParams(location.search).get('date') : null;
+  const onwardLink = document.getElementById('onward');
+  const onward = () => ONWARD !== null && solvedCount() === TIERS.length;
+  // ---- onward click plan begin ----
+  // What a click (or middle click) on the onward control should do. `event`
+  // carries only the fields a real click event exposes; `available` is
+  // `onward()` — the day on screen is solved and there is a next daily to
+  // hand the player to.
+  function onwardClickPlan(event, available) {
+    if (!event.isTrusted || !available || event.altKey) return 'ignore';
+    if (event.ctrlKey || event.metaKey || event.shiftKey || event.button !== 0) return 'count';
+    return 'navigate';
+  }
+  function onwardAuxclickPlan(event, available) {
+    return event.isTrusted && available && event.button === 1 ? 'count' : 'ignore';
+  }
+  // ---- onward click plan end ----
+  if (ONWARD) {
+    onwardLink.addEventListener('click', (event) => {
+      const plan = onwardClickPlan(event, onward());
+      if (plan === 'ignore') return;
+      if (plan === 'count') { countOnward(); return; }
+      event.preventDefault();
+      goOnward();
+    });
+    onwardLink.addEventListener('auxclick', (event) => {
+      if (onwardAuxclickPlan(event, onward()) === 'count') countOnward();
+    });
+  }
+  function countOnward() { emit('next_game', { day: S.day }); }
+  function goOnward() {
+    if (!ONWARD || !onward()) return;
+    sfx.click();
+    countOnward();
+    setTimeout(() => onwardLink.click(), 100);
+  }
+  const titleSummary = () => `Day ${S.day}${archive() ? `, ${dayDate(S.day)}, from the archive` : ''}. ${solvedCount()} of 2 puzzles solved.`;
+
+  const toast = (message, spoken = message) => {
+    // Readable on the first glance: a floor of 4 s and enough headroom for the
+    // words, capped at 8 s so a long wrong-check note still clears (ARK-110).
+    const words = message.split(' ').length;
+    S.toast = { text: message, t: 0, dur: Math.min(8, Math.max(4, 1.1 + words * 0.26)) };
+    announce(spoken);
+  };
+  const shake = (amount) => { if (!calm()) S.shake = amount; };
+
+  /** Every source's accumulated candidate set, from this run's listen history — the same reading a listen gives, replayed. */
+  function candidateSets(p, listens) {
+    return Array.from({ length: p.k }, (_, i) => {
+      let set = null;
+      for (const heading of listens) {
+        const pair = new Set(candidatesFor(p.bearings[i], heading));
+        set = set ? new Set([...set].filter((x) => pair.has(x))) : pair;
+      }
+      // In stop order, never in the order candidatesFor() finds them: that order puts
+      // the true bearing first, and the readout "SSE or NNE" named the answer (#303).
+      return new Set([...(set || [])].sort((a, b) => a - b));
+    });
+  }
+
+  // What to do next, in two lines: the goal, what a listen gives, and how to
+  // finish. A pure function of what the readouts below the dial already print —
+  // the tier's source count, the candidate sets, the marks and whether the puzzle
+  // is solved — so it never tells the picture more than the ears (session #303).
+  function coachLines(k, cand, marks, isLocked) {
+    if (isLocked) return null; // the solved screen speaks for itself
+    if (cand.every((set) => set.size === 0)) {
+      return [`Find the ${k === 3 ? 'three' : 'two'} hidden sources.`, 'Tap Listen: the lines below say where each could be.'];
+    }
+    if (cand.some((set) => set.size > 1)) {
+      return ['One listen gives two points: a front and a back.', 'Turn with ‹ ›, then Listen again: the shared point is the source.'];
+    }
+    if (marks.size < k) return ['Every source is pinned down — mark it.', 'Tap its point on the dial.'];
+    return ['All marked — press Check.', 'A wrong check costs 2.'];
+  }
+
+  function describeState() {
+    const p = puzzle(), r = run();
+    const heading = `facing ${POINTS[S.heading]}`;
+    const cand = candidateSets(p, r.listens);
+    const readouts = cand.map((set, i) => `source ${i + 1}: ${set.size ? [...set].map((s) => POINTS[s]).join(' or ') : 'not listened yet'}`).join('. ');
+    const marks = S.marks.size ? Array.from(S.marks).map((s) => POINTS[s]).join(', ') : 'none';
+    const coach = coachLines(p.k, cand, S.marks, locked());
+    return `${p.k} sources, ${heading}, ${r.listens.length} listens spent. ${readouts}. Marks: ${marks}.${coach ? ` ${coach.join(' ')}` : ''}`;
+  }
+
+  // ---- persistence ----
+  function parseStore(raw) {
+    try {
+      const data = JSON.parse(raw || 'null');
+      return data && typeof data === 'object' && data.days && typeof data.days === 'object' ? data : { days: {} };
+    } catch { return { days: {} }; }
+  }
+  const readStore = () => parseStore(storage.get(STORE));
+
+  function entryFor(tier) {
+    const r = S.runs[tier];
+    return { i: r.inputs, g: Array.from(r.marks ?? []).join('.'), m: r.moves, s: r.solved ? r.solvedMoves : 0, p: r.solved ? r.par : 0 };
+  }
+
+  function currentEntries() {
+    return S.runs.map((r, tier) => (tier === S.tier && !S.practice ? { i: r.inputs, g: Array.from(S.marks).join('.'), m: r.moves, s: r.solved ? r.solvedMoves : 0, p: r.solved ? r.par : 0 } : entryFor(tier)));
+  }
+
+  function writeStore() {
+    const data = readStore();
+    data.days[S.day] = mergeDay(data.days[S.day], currentEntries(), null, null);
+    if (solvedCount() === TIERS.length) {
+      const freezeAvailable = !S.freezeUsedDay || S.day - S.freezeUsedDay >= FREEZE_COOLDOWN;
+      const next = streakAfter(S.streak, S.lastFull, S.day, S.today, freezeAvailable);
+      if (next) {
+        S.streak = next.streak; S.lastFull = next.lastFull; S.bestStreak = Math.max(S.bestStreak, S.streak);
+        if (next.freezeUsed) { S.freezeUsedDay = S.day; toast('Missed a day — your streak freeze covered it.'); }
+      }
+    }
+    data.streak = S.streak; data.best = S.bestStreak; data.lastFull = S.lastFull; data.freezeUsedDay = S.freezeUsedDay;
+    if (!storage.set(STORE, JSON.stringify(data)) && !S.storageWarned) {
+      S.storageWarned = true;
+      toast('This browser is not keeping your progress.');
+    }
+  }
+
+  function absorb(data) {
+    const saved = data.days[S.day];
+    if (Array.isArray(saved)) {
+      const merged = mergeDay(saved, currentEntries(), null, null);
+      merged.forEach((entry, tier) => {
+        const r = S.runs[tier];
+        r.moves = entry.m;
+        if (entry.s > 0 && !(r.solved && r.solvedMoves === entry.s)) {
+          const state = replay(entry.i);
+          r.solved = true; r.solvedMoves = entry.s; r.par = entry.p;
+          r.inputs = state.inputs; r.listens = state.listens;
+          r.marks = new Set(marksOf(entry.g));
+          emit('closed', { day: S.day, tier: tier + 1 });
+          if (tier === S.tier && !S.practice) { S.marks = new Set(r.marks); toast(`${TIERS[tier].label} was solved in another tab, in ${entry.s}.`); }
+        }
+      });
+    }
+    S.streak = Number(data.streak) || 0;
+    S.bestStreak = Math.max(S.bestStreak, Number(data.best) || 0);
+    S.lastFull = Number(data.lastFull) || 0;
+    S.freezeUsedDay = cleanFreezeUsedDay(Number(data.freezeUsedDay) || 0);
+  }
+
+  // Bumped by every listen and by every switch of puzzle: a listen's timers act only
+  // while it is still the latest one (doListen).
+  let listenSeq = 0;
+  // The tones one listen has scheduled, so leaving the puzzle mid-listen can cut them
+  // off instead of letting them ring over the next screen (silenceListen).
+  let listenVoices = [];
+  // A listen still waiting for the sound to resume: the call that starts it (doListen).
+  let pendingListen = null;
+  // `now`: the sound is suspended right after this (mute, a hidden tab). suspend()
+  // freezes the audio clock where it stands, so a fade scheduled on it would only play
+  // on resume — the whole 30 ms of a sounding tone at its full level, over whatever
+  // screen the sound comes back on (ARK-38). Stopped at once, the tone ends where the
+  // suspend cuts the output anyway.
+  const silenceListen = (now = false) => {
+    if (audio) {
+      const t = audio.currentTime;
+      // A voice a previous call already faded stays reachable until its stop time: a
+      // mute or a hidden tab inside that 50 ms would otherwise miss it, suspend() would
+      // freeze the fade where it stands, and the rest would play on resume (ARK-47). A
+      // voice whose stop time has passed is dropped here.
+      listenVoices = listenVoices.filter((voice) => voice.stopAt === undefined || voice.stopAt > t);
+      for (const voice of listenVoices) {
+        try {
+          // Before a suspend the voice stops at the frozen time, no fade: suspend()
+          // freezes the audio clock where it stands, so a fade scheduled on it would only
+          // play on resume — the whole 30 ms of a sounding tone at its full level (ARK-38).
+          if (now) {
+            // The output stage is zeroed as well: the ITD delay lines still hold up to
+            // 0.65 ms of the tone for the far ear, a click on resume.
+            voice.cut.gain.setValueAtTime(0, t);
+            voice.osc.stop(t);
+            voice.stopped = true;
+            voice.stopAt = t;
+            continue;
+          }
+          if (voice.stopped) continue;
+          voice.stopped = true;
+          // A tone still waiting for its turn is cancelled outright: stopped before its
+          // start, it never sounds. Faded instead, it would fade from the gain's default
+          // of 1, not from its 0.09 — a pop up to ten times louder than the tone when
+          // the player leaves just before it (ARK-29).
+          if (voice.start > t) {
+            voice.osc.stop(t);
+            voice.stopAt = t;
+            continue;
+          }
+          // Only the cut stage is faded: nothing else automates it, so its value is always
+          // the unity it was built at and the envelope's own gain is never read or
+          // cancelled — a read lands on the GainNode default of 1 in the block a tone
+          // starts in, a step up over the envelope's 0 (ARK-37). The fade is anchored by a
+          // write of that unity, not a read: a ramp with no event before it starts at the
+          // call in Chrome, but at time 0 in older engines — a cut, not a fade (ARK-38).
+          voice.cut.gain.setValueAtTime(1, t);
+          voice.cut.gain.linearRampToValueAtTime(0.0001, t + 0.03);
+          voice.osc.stop(t + 0.05);
+          voice.stopAt = t + 0.05;
+        } catch {
+          // A second osc.stop() throws in some engines; a disconnected voice cannot
+          // reach the destination, so a tone that would not stop cannot play on (ARK-37).
+          voice.stopped = true;
+          voice.stopAt = t;
+          for (const node of [voice.osc, voice.gain, voice.cut]) { try { node.disconnect(); } catch { /* already detached */ } }
+        }
+      }
+    } else {
+      listenVoices = [];
+    }
+  };
+  const stopListening = (now = false) => { listenSeq++; pendingListen = null; S.listening = false; S.listenStep = -1; silenceListen(now); };
+
+  function selectTier(tier) {
+    S.tier = tier;
+    S.practice = false; S.practiceRun = null;
+    S.help = false;
+    S.flash = 0; S.shake = 0;
+    S.heading = 0;
+    stopListening();
+    S.marks = new Set(run().marks);
+  }
+
+  /** Opens a day's two puzzles: today, or any earlier day back to day 1. */
+  function loadDay(day) {
+    S.today = dayNumber(new Date());
+    day = Math.min(Math.max(1, day), S.today);
+    S.day = day;
+    S.newDay = false;
+    S.puzzles = TIERS.map((_, tier) => makePuzzle(day, tier));
+    const data = readStore();
+    const saved = Array.isArray(data.days[day]) ? data.days[day] : [];
+    S.streak = Number(data.streak) || 0;
+    S.bestStreak = Number(data.best) || 0;
+    S.lastFull = Number(data.lastFull) || 0;
+    S.freezeUsedDay = cleanFreezeUsedDay(Number(data.freezeUsedDay) || 0);
+    S.runs = S.puzzles.map((p, tier) => {
+      const entry = saved[tier] || {};
+      const state = replay(entry.i);
+      const solvedMoves = Number(entry.s) || 0;
+      return {
+        inputs: state.inputs, listens: state.listens,
+        marks: new Set(marksOf(entry.g)),
+        moves: Math.max(Number(entry.m) || 0, state.moves),
+        solved: solvedMoves > 0, solvedMoves, par: Number(entry.p) || 0,
+      };
+    });
+    const firstOpen = S.runs.findIndex((r) => !r.solved);
+    selectTier(firstOpen < 0 ? 0 : firstOpen);
+  }
+
+  const POSE = { day: 40, tier: 1 };
+  function posePicture() {
+    S.day = S.today = POSE.day;
+    S.puzzles = TIERS.map((_, tier) => makePuzzle(POSE.day, tier));
+    S.runs = S.puzzles.map((p, tier) => {
+      if (tier < POSE.tier) return { inputs: '', listens: [], marks: new Set(), moves: p.par, solved: true, solvedMoves: p.par, par: p.par };
+      if (tier === POSE.tier) {
+        const listens = [0];
+        return { inputs: '0', listens, marks: new Set([p.bearings[0]]), moves: 1, solved: false, solvedMoves: 0, par: 0 };
+      }
+      return { inputs: '', listens: [], marks: new Set(), moves: 0, solved: false, solvedMoves: 0, par: 0 };
+    });
+    S.gatePassed = true;
+    selectTier(POSE.tier);
+    S.marks = new Set(S.runs[POSE.tier].marks);
+    S.mode = 'play';
+  }
+
+  function markStart() {
+    const key = `${S.day}:${S.tier}`;
+    if (run().solved || started.has(key)) return;
+    started.add(key);
+    emit('start', { game: SLUG, day: S.day, tier: S.tier + 1, archive: archive() });
+  }
+
+  function followToday() {
+    const today = dayNumber(new Date());
+    if (today === S.today) return false;
+    if (S.day !== S.today) { S.today = today; return false; }
+    loadDay(today);
+    return true;
+  }
+
+  function checkDay() {
+    if (PICTURE || dayNumber(new Date()) === S.today) return;
+    // A new day changes the screen with no event to say so, but only once: mid-puzzle
+    // S.today stays behind on purpose, and this check comes round every five seconds.
+    if (S.mode === 'play' && S.day === S.today) {
+      if (!S.newDay) {
+        invalidate();
+        S.newDay = true;
+        toast(touch() ? 'A new puzzle is out. Tap the home button.' : 'A new puzzle is out. Press Esc.');
+      }
+      return;
+    }
+    invalidate(); // followToday() catches S.today up, so this runs once a day too
+    followToday();
+  }
+
+  function stepDay(delta) {
+    const target = S.day + delta;
+    if (target < 1 || target > dayNumber(new Date())) {
+      sfx.bump();
+      announce(target < 1 ? 'Day 1 is the first day.' : 'This is today. A new puzzle comes at midnight.');
+      return;
+    }
+    S.mode = 'title'; S.help = false; S.toast = null;
+    loadDay(target);
+    sfx.click();
+    announce(titleSummary());
+  }
+
+  // ---- game flow ----
+  function goTitle() {
+    // A listen the player walks away from stops here: its scheduled tones are cut and
+    // its timers no longer step, so nothing of the old puzzle sounds over the title.
+    stopListening();
+    S.mode = 'title';
+    S.help = false;
+    followToday();
+    sfx.click();
+    announce(titleSummary());
+  }
+
+  function startPlay(tier) {
+    ensureAudio();
+    followToday();
+    if (tier !== undefined && tier !== S.tier) selectTier(tier);
+    else {
+      // Same tier as before: selectTier() (which clears practice) is skipped,
+      // so an in-progress practice run must be cleared here instead — title →
+      // play on an already-solved, already-practiced tier must land back on
+      // the real, saved run, not resume the stale practice one (trunk-line
+      // guards this exact path in its own startPlay()).
+      S.practice = false; S.practiceRun = null;
+      S.marks = new Set(run().marks);
+    }
+    S.mode = 'play';
+    S.help = false; S.toast = null;
+    sfx.click();
+    markStart();
+    announce(`Day ${S.day}, ${TIERS[S.tier].label}-source puzzle, par ${puzzle().par}. ${describeState()}`);
+    reportFocus();
+  }
+
+  function setTier(tier) {
+    if (S.mode !== 'play' || tier === S.tier) return;
+    selectTier(tier);
+    markStart();
+    sfx.click();
+    announce(`${TIERS[tier].label}. Par ${puzzle().par}. ${describeState()}`);
+    reportFocus();
+  }
+
+  function rotate(delta) {
+    if (S.mode !== 'play') return;
+    S.heading = norm16(S.heading + delta);
+    sfx.click();
+    announce(`Facing ${POINTS[S.heading]}.`);
+  }
+
+  function doListen() {
+    if (S.mode !== 'play' || locked() || S.listening) return;
+    ensureAudio();
+    const p = puzzle(), r = run();
+    const heading = S.heading;
+    r.listens.push(heading);
+    r.inputs = r.inputs ? `${r.inputs}.${heading}` : String(heading);
+    r.moves++;
+    if (!S.practice) { emit('progress', { moves: run().moves, tier: S.tier + 1, day: S.day, archive: archive() }); writeStore(); }
+    S.listening = true; S.listenStep = 0;
+    // Each listen owns its timers: a puzzle switched mid-listen (tier, practice) bumps
+    // listenSeq, and the old listen's timers then step nothing on the new puzzle.
+    const seq = ++listenSeq;
+    listenVoices = [];
+    const GAP = 0.85;
+    // The tones and the timers that draw their highlights are one schedule. A listen that
+    // finds the sound suspended — the tab was hidden and shown, and nothing resumed the
+    // context yet — resumes it first and lets both wait for the running clock. Scheduled
+    // in the same tick against a suspended context, the tones would land on a clock that
+    // is not advancing, never sound, and still spend the move while the highlight stepped
+    // on the page clock (ARK-47).
+    const schedule = () => {
+      const t0 = audio && audio.state === 'running' ? audio.currentTime + 0.05 : 0;
+      p.bearings.forEach((bearing, i) => {
+        const rel = norm16(bearing - heading);
+        const pan = Math.sin((rel * Math.PI) / (DIAL / 2));
+        if (t0) {
+          const voice = spatialTone(pan, t0 + i * GAP, 420 + i * 70, 0.5);
+          if (voice) listenVoices.push(voice);
+        }
+        // A timer that changes the picture is an event, not an animation: it draws
+        // the new highlight and then the loop stops again.
+        setTimeout(() => { invalidate(); if (seq === listenSeq) S.listenStep = i; }, i * GAP * 1000);
+      });
+      setTimeout(() => { invalidate(); if (seq === listenSeq) { S.listening = false; S.listenStep = -1; listenVoices = []; } }, p.bearings.length * GAP * 1000 + 200);
+    };
+    // A muted listen makes no sound by design, and a running context schedules at once.
+    // Only a suspended, unmuted context is waited on (ARK-47), and the first of these
+    // starts the listen, once: resume() settles (a rejected one starts it silent, so the
+    // listen still ends); the player mutes (toggleMute starts it as a muted listen); a
+    // second passes (it starts silent). A context the system holds or one with no output
+    // device never settles resume() — measured in Firefox — and a listen that waited on
+    // it alone hung with Listen dead. Leaving the puzzle drops the wait (stopListening).
+    if (S.muted || !audio || audio.state === 'running') schedule();
+    else {
+      const begin = () => { if (pendingListen === begin) { pendingListen = null; schedule(); } };
+      pendingListen = begin;
+      audio.resume().catch(() => {}).then(begin);
+      setTimeout(begin, 1000);
+    }
+    const cand = candidateSets(p, r.listens);
+    const readouts = cand.map((set, i) => `source ${i + 1}: ${[...set].map((s) => POINTS[s]).join(' or ')}`).join('. ');
+    announce(`Listened from ${POINTS[heading]}. ${readouts}.`);
+  }
+
+  function toggleMark(stop) {
+    if (S.mode !== 'play' || locked()) return;
+    const p = puzzle();
+    if (S.marks.has(stop)) { S.marks.delete(stop); sfx.unmark(); }
+    else {
+      if (S.marks.size >= p.k) { toast(`Mark up to ${p.k} points. Clear one first.`); sfx.bump(); return; }
+      S.marks.add(stop); sfx.mark();
+    }
+    run().marks = new Set(S.marks);
+    if (!S.practice) writeStore();
+    announce(`${S.marks.has(stop) ? 'Marked' : 'Unmarked'} ${POINTS[stop]}.`);
+  }
+
+  function clearMarks() {
+    if (S.mode !== 'play' || locked() || !S.marks.size) return;
+    S.marks.clear();
+    run().marks = new Set();
+    if (!S.practice) writeStore();
+    sfx.click();
+    announce('Marks cleared.');
+  }
+
+  function toggleMute() {
+    S.muted = !S.muted;
+    storage.set(STORE_MUTE, S.muted ? '1' : '0');
+    if (S.muted) {
+      // The listen's own end timer runs on the page clock and clears listenVoices while
+      // its tones are still queued on the audio clock; suspending freezes them there and
+      // unmuting would resume them over the title, another tier, or a new listen. Silence
+      // them now, but leave S.listening/listenStep so the dial highlight is unchanged (#37).
+      silenceListen(true);
+      if (audio) audio.suspend().catch(() => {});
+      // A listen still waiting for the sound goes on from here as a muted one. Left
+      // waiting, its resume() — which Chrome keeps pending across this suspend() —
+      // settled on unmute and played the old listen then (ARK-48).
+      if (pendingListen) pendingListen();
+    } else ensureAudio();
+    announce(S.muted ? 'Muted.' : 'Sound on.');
+  }
+
+  function celebrate() {
+    sfx.win();
+    if (!calm()) S.flash = 0.5;
+  }
+
+  function solvedNow() {
+    const p = puzzle(), r = run();
+    if (S.practice) {
+      celebrate();
+      const over = r.moves - p.par;
+      toast(`Practice solved in ${r.moves}. ${over <= 0 ? 'Par!' : `${over} over par.`}`);
+      return;
+    }
+    r.solved = true; r.solvedMoves = r.moves; r.par = p.par;
+    writeStore();
+    celebrate();
+    const over = r.solvedMoves - p.par;
+    emit('gameover', { won: true, score: r.solvedMoves, par: p.par, tier: S.tier + 1, day: S.day, archive: archive(), streak: S.streak });
+    const verdict = over < 0 ? `${-over} under par: a very clean triangulation.` : over === 0 ? 'Par! A star.' : `Solved, ${over} over par.`;
+    toast(`${verdict} ${solvedCount() === TIERS.length ? 'Both done.' : 'The other puzzle is next when ready.'}`);
+  }
+
+  function doCheck() {
+    if (S.mode !== 'play' || locked()) return;
+    const p = puzzle(), r = run();
+    const verdict = judge(p, Array.from(S.marks));
+    if (verdict.ok) { solvedNow(); return; }
+    if (verdict.reason === 'count') { toast(`Mark exactly ${p.k} points first.`); sfx.bump(); return; }
+    ensureAudio();
+    r.inputs = r.inputs ? `${r.inputs}.x` : 'x';
+    r.moves += 2;
+    if (!S.practice) writeStore();
+    toast('Not quite. Listen again from a different heading to narrow it down. Cost 2.');
+    sfx.fail(); shake(5);
+  }
+
+  function startPractice() {
+    if (!run().solved) return;
+    // Re-triggering practice (the replay button/key work any time it is
+    // active) must not re-emit `practice` on every click — the exact bug
+    // session #239 found and fixed in one-step-late/ink-side-down. Computed
+    // before S.practice flips, so a second call sees itself already practicing.
+    const enteringPractice = !S.practice;
+    S.practice = true;
+    S.practiceRun = { listens: [], inputs: '', moves: 0, solved: false, solvedMoves: 0, par: puzzle().par };
+    S.marks = new Set();
+    stopListening();
+    S.heading = 0;
+    S.help = false; S.toast = null;
+    S.mode = 'play';
+    sfx.click();
+    if (enteringPractice) emit('practice', { tier: S.tier + 1, day: S.day, archive: archive() });
+    announce('Practice run. Nothing here is saved.');
+  }
+
+  function goNext() {
+    const nextTier = S.runs.findIndex((r, i) => i > S.tier && !r.solved);
+    selectTier(nextTier < 0 ? (S.tier + 1) % TIERS.length : nextTier);
+    S.mode = 'play';
+    markStart();
+    sfx.click();
+    announce(`${TIERS[S.tier].label}. Par ${puzzle().par}. ${describeState()}`);
+    reportFocus();
+  }
+
+  function shareText() {
+    const marks = S.runs.map((r, tier) => shareMark(r.solvedMoves, S.puzzles[tier].par));
+    return `Bearing #${S.day}${archive() ? ' (archive)' : ''}\n${marks.join('  ')}\n${SHARE_URL}`;
+  }
+  function openCopyBox(message) {
+    copyText.value = message;
+    copyBox.classList.add('open');
+    copyText.focus(); copyText.select();
+  }
+  function share() {
+    const message = shareText();
+    sfx.click();
+    const shared = () => emit('share', { day: S.day, score: solvedCount() });
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      // The promise resolves outside every handler: the toast and the copy box
+      // both land with no event to draw them, so each callback invalidates first.
+      navigator.clipboard.writeText(message).then(
+        () => { invalidate(); shared(); toast('Copied! Paste it anywhere.'); },
+        () => { invalidate(); openCopyBox(message); },
+      );
+    } else openCopyBox(message);
+  }
+  // The dialog is a page element over the canvas, but closing it hands focus back
+  // to the canvas: draw the frame so the picture is never left stale.
+  copyClose.addEventListener('click', () => {
+    invalidate();
+    copyBox.classList.remove('open');
+    canvas.focus();
+  });
+
+  // ---- sound-check gate ----
+  // A standalone, optional screen — not inserted into the start flow (a
+  // deliberate divergence from the letter of the spec, with reason: the
+  // portal's own smoke test requires every game to go from a start gesture
+  // straight to a playable, event-reporting state, and a gate in front of that
+  // — even a softened one a player can skip — breaks that contract for anyone
+  // driving the game without a human answering it, automated checks included).
+  // Reachable any time from the title screen; doubles as a first-gesture
+  // AudioContext unlock and an honest "this plays best with headphones" note
+  // for anyone who never opens it.
+  function openGate() {
+    S.gateAttempts = 0;
+    S.mode = 'gate';
+    S.help = false;
+    playGateTone();
+  }
+  function playGateTone() {
+    ensureAudio();
+    S.gateSide = Math.random() < 0.5 ? -1 : 1;
+    if (audio && audio.state === 'running') spatialTone(S.gateSide, audio.currentTime + 0.05, 523, 0.7);
+    announce('Playing a tone panned hard left or right.');
+  }
+  function answerGate(side) {
+    if (side === S.gateSide) {
+      S.gatePassed = true;
+      storage.set(STORE_GATE, '1');
+      sfx.win();
+      toast('Sound check passed.');
+      goTitle();
+      return;
+    }
+    S.gateAttempts++;
+    sfx.bump();
+    announce(`Not quite. ${S.gateAttempts >= 2 ? 'You can continue without headphones, or try again.' : 'Try again.'}`);
+    playGateTone();
+  }
+  function skipGate() {
+    sfx.click();
+    goTitle();
+  }
+
+  // ---- update ----
+  // What advances between frames: the flash of a solve, the shake of a wrong
+  // check and the age of the toast. The drawing only reads these, so on a still
+  // screen nothing moves and the loop can stop; a hidden tab or the photographer's
+  // pose stands still, exactly as the old frame() passed a zero dt to drawEffects().
+  function update(dt) {
+    if (PICTURE || S.hidden) return;
+    if (S.flash > 0) S.flash = Math.max(0, S.flash - dt * 1.5);
+    if (S.shake > 0) S.shake = Math.max(0, S.shake - dt * 20);
+    if (S.toast) {
+      S.toast.t += dt;
+      if (S.toast.t >= S.toast.dur) S.toast = null;
+    }
+  }
+
+  // ---- rendering ----
+  let hitRegions = [];
+  const addHit = (x, y, w, h, action) => hitRegions.push({ x, y, w, h, action });
+  function hitTest(x, y) {
+    for (let i = hitRegions.length - 1; i >= 0; i--) {
+      const r = hitRegions[i];
+      if (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) return r.action;
+    }
+    return null;
+  }
+
+  function roundRect(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  // ---- lantern harbour skin (ARK-110) ----
+  // Lighten or darken a #rrggbb fill by f (negative darkens). Cheap enough for a
+  // press frame; the desk and plates keep every other fill flat (D-086).
+  function shade(hex, f) {
+    const n = parseInt(hex.slice(1), 16);
+    const ch = (v) => Math.max(0, Math.min(255, Math.round(v * (1 + f))));
+    return `rgb(${ch(n >> 16)},${ch((n >> 8) & 0xff)},${ch(n & 0xff)})`;
+  }
+
+  // The listening desk — sun-bleached wood with a low lantern glow from the
+  // upper right — is drawn straight to the frame. The two gradients are cheap
+  // to recreate per repaint, and the drawing code may only write to ctx (the
+  // offscreen canvas it once cached to would need member writes of its own).
+  function desk() {
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, '#fffaf0');
+    g.addColorStop(1, '#f4e7c6');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+    const glow = ctx.createRadialGradient(W - 24, 16, 0, W - 24, 16, 400);
+    glow.addColorStop(0, 'rgba(255,182,39,0.20)');
+    glow.addColorStop(1, 'rgba(255,182,39,0)');
+    ctx.fillStyle = glow; ctx.fillRect(0, 0, W, H);
+    ctx.strokeStyle = 'rgba(201,146,46,0.22)'; ctx.lineWidth = 1;
+    for (let y = 132; y < H; y += 128) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+  }
+
+  // A raised enamel plate: a flat drop shadow, the body, and a light lip on the
+  // top edge — a bevel without a blur. Pressed, it sinks (no shadow, darker body).
+  function plate(x, y, w, h, r, fill, pressed) {
+    const dy = pressed ? 2 : 0;
+    if (!pressed) {
+      ctx.fillStyle = 'rgba(22,50,79,0.18)';
+      roundRect(x, y + 3, w, h, r); ctx.fill();
+    }
+    ctx.fillStyle = pressed ? shade(fill, -0.14) : fill;
+    roundRect(x, y + dy, w, h, r); ctx.fill();
+    ctx.strokeStyle = 'rgba(22,50,79,0.30)'; ctx.lineWidth = 1;
+    roundRect(x + 0.5, y + dy + 0.5, w - 1, h - 1, r); ctx.stroke();
+    if (!pressed) {
+      ctx.strokeStyle = 'rgba(255,255,255,0.55)'; ctx.lineWidth = 1.5;
+      roundRect(x + 1, y + 1, w - 2, h - 2, Math.max(0, r - 1)); ctx.stroke();
+    }
+  }
+
+  // A flat panel with a coloured rim: the tier cards and the help sheet.
+  function panel(x, y, w, h, r, fill, stroke) {
+    ctx.fillStyle = 'rgba(22,50,79,0.12)';
+    roundRect(x, y + 3, w, h, r); ctx.fill();
+    ctx.fillStyle = fill;
+    roundRect(x, y, w, h, r); ctx.fill();
+    ctx.strokeStyle = stroke || 'rgba(22,50,79,0.30)'; ctx.lineWidth = 2;
+    roundRect(x, y, w, h, r); ctx.stroke();
+    ctx.strokeStyle = 'rgba(255,255,255,0.5)'; ctx.lineWidth = 1.5;
+    roundRect(x + 1.5, y + 1.5, w - 3, h - 3, Math.max(0, r - 1.5)); ctx.stroke();
+  }
+
+  function button(x, y, w, h, label, action, active, enabled = true) {
+    // Self-contained: a body fill, a dark edge and a light top lip (the bevel).
+    // The body is drawn first, at exactly x/y — the test pins the first pill.
+    ctx.fillStyle = active ? C.accent : C.card;
+    roundRect(x, y, w, h, 10); ctx.fill();
+    ctx.strokeStyle = 'rgba(22,50,79,0.30)'; ctx.lineWidth = 1;
+    roundRect(x + 0.5, y + 0.5, w - 1, h - 1, 9); ctx.stroke();
+    ctx.strokeStyle = 'rgba(255,255,255,0.55)'; ctx.lineWidth = 1.5;
+    roundRect(x + 1, y + 1, w - 2, h - 2, 8); ctx.stroke();
+    ctx.fillStyle = !enabled ? C.muted : active ? C.navy : C.text;
+    ctx.font = `700 24px ${FONT}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(label, x + w / 2, y + h / 2 + 1, w - 12);
+    // The pill is drawn at the size the touch floor needs (62+ logical px,
+    // ~45 CSS px in the portal frame — ARK-88), so the hit box is the pill.
+    if (enabled) addHit(x, y, w, h, action);
+  }
+
+  function iconButton(x, y, w, h, icon, action) {
+    plate(x, y, w, h, 10, C.card, false);
+    const cx = x + w / 2, cy = y + h / 2;
+    // The glyph paths are written around (0, 0) and scaled up to the bigger
+    // pill, so the icons read at the same weight as their 62 px target.
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.scale(1.5, 1.5);
+    ctx.strokeStyle = C.text; ctx.fillStyle = C.text; ctx.lineWidth = 2; ctx.lineCap = 'round';
+    if (icon === 'home') {
+      ctx.beginPath();
+      ctx.moveTo(-8, -1); ctx.lineTo(0, -8); ctx.lineTo(8, -1);
+      ctx.moveTo(-5, -3); ctx.lineTo(-5, 8); ctx.lineTo(5, 8); ctx.lineTo(5, -3);
+      ctx.stroke();
+    } else if (icon === 'prev' || icon === 'next') {
+      // Same chevron the sibling games (One Step Late, Ink Side Down, Blind
+      // Corners) draw for day-nav — was bare text here, the one control that
+      // didn't get the pill treatment (IDEA-BACKLOG.md/BENCHMARK.md gap #2).
+      const back = icon === 'prev' ? 1 : -1;
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(5 * back, -11); ctx.lineTo(-6 * back, 0); ctx.lineTo(5 * back, 11);
+      ctx.stroke();
+    } else {
+      ctx.beginPath();
+      ctx.moveTo(-9, -3); ctx.lineTo(-5, -3); ctx.lineTo(0, -8);
+      ctx.lineTo(0, 8); ctx.lineTo(-5, 3); ctx.lineTo(-9, 3);
+      ctx.closePath(); ctx.fill();
+      ctx.beginPath();
+      if (S.muted) {
+        ctx.moveTo(3, -4); ctx.lineTo(10, 4);
+        ctx.moveTo(10, -4); ctx.lineTo(3, 4);
+      } else {
+        ctx.arc(2, 0, 5, -0.9, 0.9);
+        ctx.moveTo(6, -8); ctx.arc(2, 0, 9, -0.9, 0.9);
+      }
+      ctx.stroke();
+    }
+    ctx.restore();
+    addHit(x, y, w, h, action);
+  }
+
+  // Skerry the harbour-keeper puffin and his brass lantern, top-left. The flame
+  // is lit while the game is audible, so the mascot carries the mute state the
+  // way the dial carries the puzzle (ARK-110).
+  function drawSkerry() {
+    ctx.save();
+    ctx.translate(2, 2);
+    const lit = !S.muted;
+    // brass lantern on a short handle, low-left
+    ctx.fillStyle = C.brass;
+    ctx.fillRect(6, 40, 2, 16);
+    ctx.fillRect(2, 56, 16, 10);
+    ctx.strokeStyle = C.brassBright; ctx.lineWidth = 1.5;
+    ctx.strokeRect(2, 56, 16, 10);
+    if (lit) {
+      ctx.fillStyle = C.flame;
+      ctx.beginPath(); ctx.arc(10, 56, 5, Math.PI, 0); ctx.fill();
+      ctx.fillStyle = 'rgba(255,182,39,0.40)';
+      ctx.beginPath(); ctx.arc(10, 56, 9, 0, Math.PI * 2); ctx.fill();
+    }
+    // body — dark back, cream chest, facing right
+    ctx.fillStyle = C.navy;
+    ctx.beginPath(); ctx.ellipse(44, 40, 17, 20, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#fdf6e3';
+    ctx.beginPath(); ctx.ellipse(38, 46, 10, 13, 0, 0, Math.PI * 2); ctx.fill();
+    // head + white face patch + eye
+    ctx.fillStyle = C.navy;
+    ctx.beginPath(); ctx.arc(47, 18, 13, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#fdf6e3';
+    ctx.beginPath(); ctx.ellipse(50, 17, 8, 9, -0.2, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = C.navy;
+    ctx.beginPath(); ctx.arc(52, 16, 2.2, 0, Math.PI * 2); ctx.fill();
+    // the coral beak — the puffin's mark
+    ctx.fillStyle = C.accent;
+    ctx.beginPath(); ctx.moveTo(57, 15); ctx.lineTo(64, 20); ctx.lineTo(57, 25); ctx.closePath(); ctx.fill();
+    // feet
+    ctx.beginPath(); ctx.ellipse(38, 62, 4, 2.2, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(48, 62, 4, 2.2, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+
+  // The words of `text` in lines no wider than maxW, in the current font: a box
+  // can be sized to its lines before any of them is drawn (the toast, ARK-89).
+  function wrapLines(text, maxW) {
+    const lines = [];
+    let line = '';
+    for (const w of text.split(' ')) {
+      const test = line ? `${line} ${w}` : w;
+      if (ctx.measureText(test).width > maxW && line) { lines.push(line); line = w; }
+      else line = test;
+    }
+    if (line) lines.push(line);
+    return lines;
+  }
+
+  // Draws the lines from y down, lineH apart; returns the y of the last line.
+  function wrapText(text, x, y, maxW, lineH) {
+    const lines = wrapLines(text, maxW);
+    lines.forEach((line, i) => ctx.fillText(line, x, y + i * lineH));
+    return y + Math.max(0, lines.length - 1) * lineH;
+  }
+
+  function drawTitle() {
+    desk();
+    addHit(0, 0, W, H, 'titledefault');
+
+    drawSkerry();
+    iconButton(W - 10 - 62, 4, 62, 62, 'mute', 'mute');
+
+    // The nextday pill and mute never share a row: the day row sits 6px below
+    // mute's pill, and hitTest resolves the last-added region first, so a tap
+    // on an overlap would be nextday's — there is none (dual-review found the
+    // old overlap while closing BENCHMARK gap #2; kept clear since).
+    const DAY_ROW_Y = 72;
+    const prevOk = S.day > 1, nextOk = S.day < S.today;
+    // Only drawn when navigable — matches the sibling games' dayArrows(),
+    // which omit the arrow entirely rather than showing it greyed out.
+    if (prevOk) iconButton(10, DAY_ROW_Y, 62, 62, 'prev', 'prevday');
+    if (nextOk) iconButton(W - 10 - 62, DAY_ROW_Y, 62, 62, 'next', 'nextday');
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = C.muted; ctx.font = `600 24px ${FONT}`;
+    ctx.fillText(titleDay(S.day, dayDate(S.day), archive()), 240, DAY_ROW_Y + 31, 320);
+
+    ctx.fillStyle = C.navy; ctx.font = `800 40px ${FONT}`;
+    ctx.fillText('Bearing', 240, 140);
+    ctx.fillStyle = C.muted; ctx.font = `400 24px ${FONT}`;
+    ctx.fillText('Rotate. Listen. Triangulate', 240, 172);
+    ctx.fillText('the hidden sources.', 240, 198);
+    ctx.fillText('Best with headphones or stereo speakers.', 240, 222, 440);
+
+    const cardY = [238, 326], cardH = 82;
+    TIERS.forEach((t, tier) => {
+      const y = cardY[tier], r = S.runs[tier];
+      panel(20, y, 440, cardH, 14, C.card, r.solved ? C.good : C.brass);
+      ctx.fillStyle = C.text; ctx.font = `800 26px ${FONT}`; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+      ctx.fillText(t.label, 44, y + 28);
+      ctx.textAlign = 'right';
+      if (r.solved) {
+        ctx.fillStyle = r.solvedMoves - r.par <= 0 ? C.good : C.warn;
+        ctx.font = `700 24px ${FONT}`;
+        ctx.fillText(parNote(r.solvedMoves, r.par), 436, y + 28, 220);
+        ctx.fillStyle = C.muted; ctx.font = `400 24px ${FONT}`;
+        ctx.fillText(`${r.solvedMoves} listens spent`, 436, y + 60, 220);
+      } else {
+        ctx.fillStyle = C.accentDim; ctx.font = `700 24px ${FONT}`;
+        ctx.fillText(r.moves ? 'In progress' : 'Not started', 436, y + 28);
+      }
+      ctx.textAlign = 'left'; ctx.fillStyle = C.muted; ctx.font = `400 24px ${FONT}`;
+      ctx.fillText(`${t.k} sources · 16-point compass · par ${t.par}`, 44, y + 60, 380);
+      ctx.textAlign = 'center';
+      addHit(20, y, 440, cardH, `card${tier}`);
+    });
+
+    if (solvedCount() === TIERS.length) {
+      ctx.fillStyle = S.streak > 0 ? C.good : C.muted; ctx.font = `700 24px ${FONT}`;
+      ctx.fillText(S.streak > 0 ? `Streak ${S.streak}${S.bestStreak > S.streak ? ` · best ${S.bestStreak}` : ''}` : 'Both puzzles solved.', 240, 428);
+    }
+
+    button(20, 440, 440, 62, 'Share', 'share', false);
+    button(20, 508, 214, 62, 'How to play', 'help', false);
+    button(246, 508, 214, 62, S.gatePassed ? 'Sound check ✓' : 'Sound check', 'opengate', false);
+    ctx.fillStyle = C.muted; ctx.font = `400 24px ${FONT}`;
+    ctx.fillText('Missed a day? The arrows above', 240, 584);
+    ctx.fillText('open every earlier one.', 240, 608);
+    // The credit moved to the How-to-play panel: three lines of small print
+    // did not fit the 640-tall title at a size a phone can read (ARK-88).
+  }
+
+  function drawGate() {
+    desk();
+    drawSkerry();
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = C.navy; ctx.font = `800 32px ${FONT}`;
+    ctx.fillText('Sound check', 240, 72);
+    ctx.fillStyle = C.muted; ctx.font = `400 24px ${FONT}`;
+    wrapText('Bearing is heard, not just seen. Put on headphones or sit between stereo speakers, then press play and say which side the tone came from.', 240, 112, 400, 30);
+
+    button(140, 244, 200, 62, 'Play the tone', 'gatetone', true);
+
+    button(56, 330, 168, 96, 'LEFT', 'gateleft', false);
+    button(256, 330, 168, 96, 'RIGHT', 'gateright', false);
+
+    ctx.fillStyle = C.muted; ctx.font = `400 24px ${FONT}`;
+    ctx.fillText(S.gateAttempts >= 2 ? 'Missed twice — that is fine.' : 'A quick tap is all it takes.', 240, 452);
+
+    button(110, 486, 260, 62, 'Continue without it', 'gateskip', false);
+  }
+
+  function drawDial() {
+    const p = puzzle(), r = run();
+    const cand = candidateSets(p, r.listens);
+
+    // Harbour-lantern halo behind the ring: flat amber disks, no gradient, so the
+    // lit readout stays inside the frame budget (D-086).
+    ctx.fillStyle = 'rgba(255,176,32,0.10)';
+    ctx.beginPath(); ctx.arc(RING_CX, RING_CY, RING_R + 42, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = 'rgba(255,176,32,0.14)';
+    ctx.beginPath(); ctx.arc(RING_CX, RING_CY, RING_R + 20, 0, Math.PI * 2); ctx.fill();
+
+    ctx.strokeStyle = C.ring; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(RING_CX, RING_CY, RING_R, 0, Math.PI * 2); ctx.stroke();
+    ctx.strokeStyle = C.ringDim; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.arc(RING_CX, RING_CY, RING_R - 26, 0, Math.PI * 2); ctx.stroke();
+
+    for (let s = 0; s < DIAL; s++) {
+      const cardinal = s % 4 === 0;
+      const outer = stopPoint(s, RING_R + (cardinal ? 14 : 8));
+      const inner = stopPoint(s, RING_R - (cardinal ? 10 : 4));
+      // Cardinals in dark brass: brassBright #f0c463 sat at ~1.5:1 on the lit desk —
+      // fainter than the minor 22.5° ticks, an inverted hierarchy (ARK-116 re-review).
+      ctx.strokeStyle = cardinal ? C.brassInk : C.ringDim;
+      ctx.lineWidth = cardinal ? 2 : 1;
+      ctx.beginPath(); ctx.moveTo(inner.x, inner.y); ctx.lineTo(outer.x, outer.y); ctx.stroke();
+      if (cardinal) {
+        const label = stopPoint(s, RING_R + 28);
+        ctx.fillStyle = C.muted; ctx.font = `700 24px ${FONT}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText(POINTS[s], label.x, label.y);
+      }
+      // As wide as the gap between two neighbouring stops allows: at R 104 the
+      // stops sit ~40.8 logical px apart, so 48-square hits overlap at the
+      // diagonals (the later-added region wins those slivers). 16 points at
+      // 44 CSS px each would need a ring this frame cannot hold — the rotate
+      // buttons and arrow keys carry the same action (ARK-88).
+      const hit = stopPoint(s, RING_R);
+      addHit(hit.x - 24, hit.y - 24, 48, 48, `stop${s}`);
+    }
+
+    // Candidate ticks: every source's accumulated reading, small and colored per source.
+    // Inks, not the light src palette: coral/teal/amber sat at 1.2–1.9:1 on the lit
+    // desk (ARK-116 P0), so the ticks wear the same dark inks as the readouts.
+    cand.forEach((set, i) => {
+      const color = C.srcInk[i % C.srcInk.length];
+      for (const stop of set) {
+        const pt = stopPoint(stop, RING_R - 26 - i * 8);
+        ctx.fillStyle = color;
+        ctx.beginPath(); ctx.arc(pt.x, pt.y, 4.5, 0, Math.PI * 2); ctx.fill();
+      }
+    });
+
+    // The player's marks: filled disks on the ring itself.
+    for (const stop of S.marks) {
+      const pt = stopPoint(stop, RING_R);
+      ctx.fillStyle = C.cursor;
+      ctx.beginPath(); ctx.arc(pt.x, pt.y, 9, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = C.bg; ctx.lineWidth = 2; ctx.stroke();
+    }
+
+    // Heading needle.
+    const tip = stopPoint(S.heading, RING_R - 30);
+    ctx.strokeStyle = C.accentDim; ctx.lineWidth = 3; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(RING_CX, RING_CY); ctx.lineTo(tip.x, tip.y); ctx.stroke();
+    ctx.lineCap = 'butt';
+    ctx.fillStyle = C.accentDim;
+    ctx.beginPath(); ctx.arc(RING_CX, RING_CY, 5, 0, Math.PI * 2); ctx.fill();
+
+    // The source sounding now is ringed where the listens so far place it — its
+    // candidate stops, the same ones the readout names — never at its true bearing:
+    // the picture must not tell more than the ears (it did until session #303).
+    if (S.listening && S.listenStep >= 0 && cand[S.listenStep]) {
+      ctx.strokeStyle = C.srcInk[S.listenStep % C.srcInk.length]; ctx.lineWidth = 3;
+      for (const s of cand[S.listenStep]) {
+        const pt = stopPoint(s, RING_R + 20);
+        ctx.beginPath(); ctx.arc(pt.x, pt.y, 10, 0, Math.PI * 2); ctx.stroke();
+      }
+    }
+  }
+
+  function drawPlay() {
+    desk();
+
+    // Same corner pair as Echo Sounding/Trunk Line's in-play HUD (BENCHMARK
+    // gap #2): this game's title text is centered, not right-aligned, so
+    // nothing forces the opposite-corners split the title screen uses for
+    // mute alone — stacking left keeps in-play home/mute geometry identical
+    // across all three Era-B dailies.
+    iconButton(W - 10 - 62, 4, 62, 62, 'home', 'home');
+    iconButton(W - 10 - 2 * 62 - 6, 4, 62, 62, 'mute', 'mute');
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'left'; ctx.fillStyle = C.text; ctx.font = `700 24px ${FONT}`;
+    ctx.fillText(`Day ${S.day} · ${TIERS[S.tier].label}${S.practice ? ' · practice' : ''}`, 14, 36, 320);
+
+    const p = puzzle(), r = run();
+    // Its own full-width row below the icon pills: at a phone-readable size the
+    // sentence no longer fits beside them (ARK-88; the visual checker found the
+    // old right-aligned tail tucked under the home pill).
+    ctx.fillStyle = C.muted; ctx.font = `400 24px ${FONT}`;
+    ctx.fillText(`Facing ${POINTS[S.heading]} · ${r.listens.length} listen${r.listens.length === 1 ? '' : 's'} spent · par ${p.par}`, 14, 80, 452);
+
+    ctx.save();
+    if (S.shake > 0) ctx.translate((Math.random() - 0.5) * S.shake, (Math.random() - 0.5) * S.shake);
+    drawDial();
+    ctx.restore();
+
+    // Per-source readouts, in words, next to the dial — the exact equivalent of
+    // what a listen conveys, for anyone who cannot rely on stereo hearing alone.
+    const cand = candidateSets(p, r.listens);
+    ctx.textAlign = 'left'; ctx.font = `600 24px ${FONT}`;
+    cand.forEach((set, i) => {
+      ctx.fillStyle = C.srcInk[i % C.srcInk.length];
+      const text = `Source ${i + 1}: ${set.size ? [...set].map((s) => POINTS[s]).join(' or ') : 'not listened yet'}`;
+      ctx.fillText(text, 24, 446 + i * 24, 452);
+    });
+
+    // The coach over the dial: what to find, what a listen gives, how to finish.
+    // It sits between the "Facing" row and the dial's top label, and reads only the
+    // candidate sets the readouts print, never the bearings (session #303).
+    const coach = coachLines(p.k, cand, S.marks, locked());
+    if (coach) {
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillStyle = C.accentDim; ctx.font = `700 25px ${FONT}`;
+      ctx.fillText(coach[0], 240, 106, 452);
+      ctx.fillStyle = C.muted; ctx.font = `400 24px ${FONT}`;
+      ctx.fillText(coach[1], 240, 132, 452);
+    }
+
+    button(24, 508, 208, 62, locked() ? 'Solved' : 'Listen', 'listen', !locked(), !locked());
+    button(240, 508, 112, 62, '‹', 'rotateccw', false);
+    button(356, 508, 112, 62, '›', 'rotatecw', false);
+
+    button(24, 572, 134, 62, locked() ? 'Replay' : 'Check', locked() ? 'replay' : 'check', false, true);
+    button(162, 572, 134, 62, 'Clear', 'clear', false, !locked());
+    button(300, 572, 168, 62, S.tier === 0 ? 'Three-source' : 'Two-source', `card${1 - S.tier}`, false);
+
+    ctx.fillStyle = C.muted; ctx.font = `400 24px ${FONT}`;
+    ctx.fillText('', 0, 0); // no-op keeps text state consistent for the next draw call
+  }
+
+  function drawHelp() {
+    ctx.fillStyle = 'rgba(22,50,79,0.50)'; ctx.fillRect(0, 0, W, H);
+    // The help sheet's own card: a flat shadow, the body, and a brass rim — the
+    // same panel() draws for the tier cards, inlined because the test rebuilds
+    // drawHelp() with nothing but ctx, C, FONT, W, H and roundRect.
+    ctx.fillStyle = 'rgba(22,50,79,0.12)';
+    roundRect(24, 13, W - 48, H - 20, 16); ctx.fill();
+    ctx.fillStyle = C.card;
+    roundRect(24, 10, W - 48, H - 20, 16); ctx.fill();
+    ctx.strokeStyle = C.brass; ctx.lineWidth = 2;
+    roundRect(24, 10, W - 48, H - 20, 16); ctx.stroke();
+    ctx.strokeStyle = 'rgba(255,255,255,0.5)'; ctx.lineWidth = 1.5;
+    roundRect(25.5, 11.5, W - 51, H - 23, 14.5); ctx.stroke();
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = C.navy; ctx.font = `800 26px ${FONT}`;
+    ctx.fillText('How to play', 240, 48);
+    ctx.fillStyle = C.text; ctx.font = `400 24px ${FONT}`; ctx.textAlign = 'left';
+    // Re-flowed by wrapText at the new size (ARK-88): the same words, broken
+    // where they fit rather than where the old 14px lines happened to end.
+    const paragraphs = [
+      'Two or three sound sources sit at fixed compass points, hidden. Rotate your heading, then listen.',
+      'Each source pulls left or right the way a real ear hears it. That pull always matches two possible bearings, mirrored across your heading — the same pull comes from a source ahead of you or behind it.',
+      'Listen again from a different heading: the new pair and the old pair share exactly one bearing. That is the truth. Mark it, and every other source, then press Check.',
+      'Every listen costs 1. A wrong check costs 2. No hard limit — extra listens are always worth it if unsure.',
+    ];
+    // Every paragraph is wrapped before any is drawn, so the lines can close up
+    // before anything overlaps: 27 px apart with Roboto, tighter only where a
+    // wider system font needs more lines, and the last one stays 36 px above the
+    // credit line (ARK-89: the first cut started each paragraph 12 px under the
+    // last line of the one above, drawing over it).
+    let ly = 84;
+    const blocks = paragraphs.map((paragraph) => wrapLines(paragraph, 408));
+    const count = blocks.reduce((n, lines) => n + lines.length, 0);
+    const lineH = Math.min(27, (H - 74 - ly - 12 * (blocks.length - 1)) / (count - 1));
+    for (const lines of blocks) {
+      lines.forEach((line, i) => ctx.fillText(line, 44, ly + i * lineH));
+      ly += lines.length * lineH + 12;
+    }
+    ctx.textAlign = 'center'; ctx.fillStyle = C.muted; ctx.font = `400 24px ${FONT}`;
+    ctx.fillText('Self-contained, no network. Made by an AI agent.', 240, H - 38, 420);
+    addHit(0, 0, W, H, 'closehelp');
+  }
+
+  function drawEffects() {
+    if (S.flash > 0) { ctx.fillStyle = `rgba(255,176,32,${S.flash * 0.3})`; ctx.fillRect(0, 0, W, H); }
+    if (S.toast) {
+      // The box grows up from the bottom edge to hold every line (ARK-89: at 24 px
+      // the wrong-check toast is three lines, and the last fell off the canvas).
+      // One roundRect path is filled then stroked, so the test counts a single
+      // box: the body is the cream, the brass rim doubles as its shadow.
+      ctx.font = `600 24px ${FONT}`;
+      const lines = wrapLines(S.toast.text, W - 120);
+      const boxH = 24 + 28 * lines.length, top = H - 16 - boxH;
+      ctx.fillStyle = '#fff4dc';
+      roundRect(36, top, W - 72, boxH, 12); ctx.fill();
+      ctx.strokeStyle = C.brass; ctx.lineWidth = 1.5;
+      ctx.stroke();
+      ctx.fillStyle = C.navy; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      lines.forEach((line, i) => ctx.fillText(line, W / 2, top + 26 + i * 28));
+    }
+  }
+
+  function syncOnward() {
+    if (!ONWARD) return;
+    onwardLink.hidden = !onward();
+    if (onward()) { onwardLink.href = ONWARD.path; onwardLink.textContent = `Play ${ONWARD.title}, another daily puzzle`; }
+  }
+
+  function render() {
+    hitRegions = [];
+    ctx.setTransform(view.dpr * view.scale, 0, 0, view.dpr * view.scale, view.dpr * view.ox, view.dpr * view.oy);
+    ctx.clearRect(-view.ox / view.scale, -view.oy / view.scale, view.cssW / view.scale, view.cssH / view.scale);
+    if (S.mode === 'title') drawTitle();
+    else if (S.mode === 'gate') drawGate();
+    else drawPlay();
+    if (S.help) drawHelp();
+    drawEffects();
+    syncOnward();
+  }
+
+  // ---- input ----
+  function handleAction(action) {
+    if (!action) return;
+    if (action === 'titledefault') {
+      const first = S.runs.findIndex((r) => !r.solved);
+      startPlay(first < 0 ? 0 : first);
+      return;
+    }
+    if (action.startsWith('card')) {
+      const tier = Number(action.slice(4));
+      if (S.mode === 'title') startPlay(tier);
+      else if (S.mode === 'play') setTier(tier);
+      return;
+    }
+    if (action.startsWith('stop')) {
+      const stop = Number(action.slice(4));
+      toggleMark(stop);
+      return;
+    }
+    switch (action) {
+      case 'prevday': stepDay(-1); return;
+      case 'nextday': stepDay(1); return;
+      case 'home': goTitle(); return;
+      case 'mute': toggleMute(); return;
+      case 'listen': doListen(); return;
+      case 'rotateccw': rotate(-1); return;
+      case 'rotatecw': rotate(1); return;
+      case 'check': doCheck(); return;
+      case 'clear': clearMarks(); return;
+      case 'replay': startPractice(); return;
+      case 'share': share(); return;
+      case 'onward': goOnward(); return;
+      case 'help': S.help = !S.help; return;
+      case 'closehelp': S.help = false; return;
+      case 'opengate': if (S.mode === 'title') openGate(); return;
+      case 'gateleft': answerGate(-1); return;
+      case 'gateright': answerGate(1); return;
+      case 'gatetone': playGateTone(); return;
+      case 'gateskip': skipGate(); return;
+    }
+  }
+
+  canvas.addEventListener('pointerdown', (e) => {
+    invalidate();
+    canvas.focus();
+    const { x, y } = toLogical(e.clientX, e.clientY);
+    handleAction(hitTest(x, y));
+  });
+
+  window.addEventListener('keydown', (e) => {
+    invalidate();
+    const holdable = e.code === 'ArrowLeft' || e.code === 'ArrowRight' || e.code === 'KeyA' || e.code === 'KeyD';
+    if (e.repeat && !holdable) return;
+    const { dir, digit, letter } = readKey(e.code, e.key);
+    if (dir === 1 || dir === 3) {
+      e.preventDefault();
+      if (S.mode === 'play') rotate(dir === 1 ? 1 : -1);
+      return;
+    }
+    if (dir === 0 || dir === 2) return;
+    if (digit >= 0 && digit < TIERS.length) {
+      e.preventDefault();
+      if (S.mode === 'title') startPlay(digit);
+      else if (S.mode === 'play') setTier(digit);
+      return;
+    }
+    const dayD = dayStep(letter);
+    if (dayD && S.mode === 'title') { e.preventDefault(); stepDay(dayD); return; }
+    switch (letter) {
+      case ' ':
+        e.preventDefault();
+        if (S.help) { S.help = false; return; }
+        if (S.mode === 'title') handleAction('titledefault');
+        else if (S.mode === 'play') doListen();
+        return;
+      case 'k': if (S.mode === 'play') doCheck(); return;
+      case 'x': if (S.mode === 'play') clearMarks(); return;
+      case 'c': share(); return;
+      case 'l': if (S.mode === 'play') announce(describeState()); return;
+      case 'r': if (S.mode === 'play') startPractice(); return;
+      case 'h': S.help = !S.help; sfx.click(); return;
+      case 'n': if (S.mode === 'play') goNext(); return;
+      case 'g': if (S.mode === 'title') openGate(); return;
+      case 'Escape':
+        if (S.help) { S.help = false; return; }
+        if (S.mode === 'gate') { goTitle(); return; }
+        if (S.mode === 'play') goTitle();
+        return;
+    }
+  });
+
+  controls.addEventListener('click', (e) => {
+    invalidate();
+    const btn = e.target.closest('button,a');
+    if (!btn) return;
+    const act = btn.dataset.act;
+    if (!act) return;
+    if (act === 'rotateccw') { if (S.mode === 'play') rotate(-1); return; }
+    if (act === 'rotatecw') { if (S.mode === 'play') rotate(1); return; }
+    if (act === 'describe') { announce(describeState()); return; }
+    if (act === 'help') { S.help = !S.help; return; }
+    handleAction(act);
+  });
+
+  window.addEventListener('resize', resize);
+  // A tab shown again is drawn again; a hidden one advances nothing (update()).
+  document.addEventListener('visibilitychange', () => {
+    invalidate();
+    S.hidden = document.hidden;
+    // A hidden tab pauses the sound; a listen left running must not resume with it.
+    if (S.hidden) stopListening(true);
+    if (S.hidden && audio) audio.suspend().catch(() => {});
+  });
+
+  // Another tab of this game saved something: take it in, so neither tab
+  // overwrites the other's solved puzzles.
+  window.addEventListener('storage', (event) => {
+    invalidate();
+    if (event.key === STORE && S.runs.length) absorb(readStore());
+  });
+
+  // ---- run ----
+  // A still screen — the title, a board nobody has touched, the help overlay —
+  // used to be redrawn sixty times a second. Now it is drawn when something
+  // changed, the rule the other dailies follow: every listener and timer that can
+  // change the picture calls invalidate() before anything else can return, and the
+  // loop owns what no event announces — a running animation (the flash of a solve,
+  // the shake of a wrong check, the toast) plus one frame after it ends. A missed
+  // invalidate is a frozen game.
+  let dirty = true, wasAnimating = false;
+  const invalidate = () => { dirty = true; };
+  // Only what moves on screen: the flash, the shake, the toast while it is up.
+  // The listen highlight steps on its own timers; a photograph holds still.
+  const animating = () => {
+    if (PICTURE) return false;
+    return S.flash > 0 || S.shake > 0 || !!S.toast;
+  };
+
+  let lastT = 0;
+  function frame(now) {
+    // Booked before anything that can throw: one bad frame must not stop every frame
+    // after it and leave the game frozen on its last picture (Pair Flip, 48ad915).
+    requestAnimationFrame(frame);
+    const dt = Math.min(0.05, lastT ? (now - lastT) / 1000 : 0);
+    lastT = now;
+    update(dt);
+    if (!PICTURE) {
+      S.dayCheck -= dt;
+      if (S.dayCheck <= 0) { S.dayCheck = 5; checkDay(); }
+    }
+    const live = animating();
+    // `wasAnimating` buys one more frame after the last one ends, so the screen
+    // never keeps a half-finished animation as its final picture.
+    if (dirty || live || wasAnimating) {
+      dirty = false;
+      render();
+      // The generator waits for this before it photographs (POSED_FLAG in picture-flag.mjs).
+      if (PICTURE) window.__arkaiPosed = true;
+    }
+    wasAnimating = live;
+  }
+
+  // The day notice's wording follows the pointer; a device that changes it — a
+  // tablet mode, a mouse plugged in — redraws a still screen. Registered after
+  // invalidate() exists, and only where a media query has addEventListener (old
+  // Safari has not).
+  if (coarseQuery && coarseQuery.addEventListener) coarseQuery.addEventListener('change', invalidate);
+  // A canvas whose backing store the browser dropped comes back blank.
+  canvas.addEventListener('contextrestored', invalidate);
+  resize();
+  if (PICTURE) posePicture(); else loadDay(dayFromDateParam(DATE_RAW) ?? dayNumber(new Date()));
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

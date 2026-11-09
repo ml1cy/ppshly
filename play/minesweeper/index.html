@@ -1,0 +1,1008 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="color-scheme" content="dark">
+<title>Minesweeper — Arkai</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0b1020; overflow: hidden; }
+  body { -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+  canvas { display: block; width: 100vw; height: 100vh; touch-action: none; outline: none; cursor: pointer; }
+</style>
+</head>
+<body>
+<canvas id="game" tabindex="0" aria-label="Minesweeper. Every board can be cleared without guessing. Tap a tile to clear it, long-press or right-click to place a flag. Arrow keys move the cursor, Space clears, F flags."></canvas>
+<script>
+(() => {
+  'use strict';
+
+  const W = 540, H = 720;
+  const AREA_TOP = 92, AREA_BOTTOM = 56, AREA_PAD = 18;
+  const FONT = 'system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif';
+  const LONG_PRESS = 340;   // ms held before a tap becomes a flag
+  const DRAG_SLOP = 12;     // px of movement that cancels a tap
+
+  const LEVELS = [
+    { key: 'easy', name: 'Easy', cols: 9, rows: 11, mines: 12 },
+    { key: 'medium', name: 'Medium', cols: 11, rows: 14, mines: 26 },
+    { key: 'hard', name: 'Hard', cols: 13, rows: 17, mines: 48 },
+  ];
+
+  const NUM_COLORS = ['', '#60a5fa', '#4ade80', '#f87171', '#c084fc', '#fb923c', '#22d3ee', '#e2e8f0', '#94a3b8'];
+  const STORE_LEVEL = 'arkai:minesweeper:level', STORE_MUTE = 'arkai:minesweeper:muted';
+  const bestKey = (key) => `arkai:minesweeper:best:${key}`;
+
+  // Set by the picture generator before this script runs: the game is being
+  // photographed for its thumbnail and social card, and poses (posePicture).
+  const PICTURE = window.__arkaiPicture === true;
+
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+
+  // A pose reads nothing and leaves nothing behind: storage is inert under it.
+  const storage = {
+    get(key) { if (PICTURE) return null; try { return localStorage.getItem(key); } catch { return null; } },
+    set(key, value) { if (PICTURE) return false; try { localStorage.setItem(key, value); return true; } catch { return false; } },
+  };
+
+  const savedLevel = LEVELS.findIndex((level) => level.key === storage.get(STORE_LEVEL));
+
+  const S = {
+    mode: 'title',          // title | playing | won | lost
+    level: savedLevel >= 0 ? savedLevel : 0,
+    grid: [], cols: 0, rows: 0, mines: 0,
+    placed: false,          // mines are laid on the first reveal, never before
+    revealed: 0, flags: 0,
+    time: 0, running: false,
+    best: 0, newBest: false,
+    cursor: { x: 0, y: 0 }, cursorVisible: false,
+    flagMode: false,
+    muted: storage.get(STORE_MUTE) === '1',
+    clock: 0, shake: 0, overT: 0,
+    parts: [],
+    boom: null,             // the mine that ended it, for the red highlight
+  };
+
+  // layout, recomputed whenever the level changes
+  const L = { cell: 40, x: 0, y: 0, w: 0, h: 0 };
+
+  // A minefield between taps is a still picture, and so is the title. Redrawn sixty
+  // times a second it cost a phone battery for identical pixels, and Lighthouse
+  // measured the page's main thread busy for seconds on a screen nobody touched.
+  // Sudoku Sixes' rule, kept here: every event handler invalidates first thing, and
+  // the loop owns what no event announces — a running animation and the clock
+  // reaching a new second. A missed invalidate is a frozen game (see the test).
+  let dirty = true, wasAnimating = false, shownSecond = -1;
+  const invalidate = () => { dirty = true; };
+
+  const emit = (event, data) => {
+    if (PICTURE) return;    // a photograph is not a game the portal should count
+    try {
+      if (window.parent && window.parent !== window) {
+        window.parent.postMessage({ type: 'game-event', event, data: data || {} }, location.origin);
+      }
+    } catch { /* not embedded */ }
+  };
+  // A throw nobody caught is a bug a player has just met, and until now only they knew.
+  // Said once per page: a frame that throws sixty times a second is one fact, not sixty.
+  // Only this page's own script counts (an extension's error is not the game breaking),
+  // and the line travels with it: this file ships byte for byte, so the line is exact.
+  let crashed = false;
+  window.addEventListener('error', (e) => {
+    if (crashed || !String(e.filename).startsWith(location.origin + location.pathname)) return;
+    crashed = true;
+    emit('crash', { line: e.lineno });
+  });
+
+  // ---- sound (generated, no assets) ----
+  let audio = null;
+  const ensureAudio = () => {
+    if (audio || S.muted) return;
+    try {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (Ctx) audio = new Ctx();
+    } catch { audio = null; }
+  };
+  const tone = (freq, dur = 0.06, type = 'square', vol = 0.045, delay = 0) => {
+    if (S.muted || !audio || audio.state !== 'running') return;
+    const t = audio.currentTime + delay;
+    const osc = audio.createOscillator();
+    const gain = audio.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, t);
+    gain.gain.setValueAtTime(0, t);
+    gain.gain.linearRampToValueAtTime(vol, t + 0.006);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    osc.connect(gain);
+    gain.connect(audio.destination);
+    osc.start(t);
+    osc.stop(t + dur + 0.02);
+  };
+
+  // ---- grid helpers ----
+  const idx = (x, y) => y * S.cols + x;
+  const inside = (x, y) => x >= 0 && y >= 0 && x < S.cols && y < S.rows;
+  const at = (x, y) => (inside(x, y) ? S.grid[idx(x, y)] : null);
+
+  function* neighbours(x, y) {
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        if (dx === 0 && dy === 0) continue;
+        if (inside(x + dx, y + dy)) yield S.grid[idx(x + dx, y + dy)];
+      }
+    }
+  }
+
+  function layout() {
+    const availW = W - AREA_PAD * 2;
+    const availH = H - AREA_TOP - AREA_BOTTOM;
+    L.cell = Math.floor(Math.min(availW / S.cols, availH / S.rows));
+    L.w = L.cell * S.cols;
+    L.h = L.cell * S.rows;
+    L.x = Math.round((W - L.w) / 2);
+    L.y = Math.round(AREA_TOP + (availH - L.h) / 2);
+  }
+
+  function newGame(levelIndex) {
+    const level = LEVELS[levelIndex];
+    S.level = levelIndex;
+    S.cols = level.cols; S.rows = level.rows; S.mines = level.mines;
+    S.grid = Array.from({ length: level.cols * level.rows }, (unused, i) => ({
+      x: i % level.cols, y: Math.floor(i / level.cols),
+      mine: false, revealed: false, flagged: false, n: 0, t: 0, wrong: false,
+    }));
+    S.placed = false; S.logical = true;
+    S.revealed = 0; S.flags = 0;
+    S.time = 0; S.running = false; S.runStart = 0;
+    S.newBest = false;
+    S.best = Number(storage.get(bestKey(level.key))) || 0;
+    S.cursor = { x: Math.floor(level.cols / 2), y: Math.floor(level.rows / 2) };
+    S.overT = 0; S.shake = 0; S.parts = []; S.boom = null;
+    S.flagMode = false; S.cursorVisible = false;
+    S.mode = 'playing';
+    storage.set(STORE_LEVEL, level.key);
+    layout();
+    emit('start', { game: 'minesweeper', level: level.key });
+  }
+
+  // ---- minefield core begin ----
+  // No board here ever asks for a guess. After the first tap, mines are dealt
+  // again and again until a player who only ever makes sound deductions,
+  // starting from that tap, clears the whole field. The deductions are the ones
+  // players actually use: a number already satisfied frees its other neighbours,
+  // a number with exactly as many hidden neighbours as mines left flags them all,
+  // two overlapping numbers are read together (1-2-1 and its kin), and once every
+  // mine is found the counter says the rest is safe. A board those four rules
+  // cannot finish is thrown away, even when a cleverer argument would have
+  // cracked it.
+  const core = (() => {
+    function neighbourTable(cols, rows) {
+      const table = [];
+      for (let i = 0; i < cols * rows; i++) {
+        const x = i % cols, y = (i - x) / cols, list = [];
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            if (!dx && !dy) continue;
+            const nx = x + dx, ny = y + dy;
+            if (nx >= 0 && ny >= 0 && nx < cols && ny < rows) list.push(ny * cols + nx);
+          }
+        }
+        table.push(list);
+      }
+      return table;
+    }
+
+    // mine: one byte per tile. Returns true when logic alone, starting with a
+    // reveal of `start`, opens every safe tile.
+    function solvesByLogic(cols, rows, mine, start, near = neighbourTable(cols, rows)) {
+      const size = cols * rows;
+      const count = new Uint8Array(size);
+      let mines = 0;
+      for (let i = 0; i < size; i++) {
+        if (mine[i]) { mines++; continue; }
+        for (const j of near[i]) count[i] += mine[j];
+      }
+      if (mine[start]) return false;
+      const state = new Uint8Array(size);   // 0 hidden, 1 open, 2 known mine
+      const queued = new Uint8Array(size), queue = [];
+      const stamp = new Int32Array(size);
+      let open = 0, marked = 0, tick = 0;
+      const safeTotal = size - mines;
+
+      // A tile changed: each open number beside it has something new to say,
+      // and only those are read again.
+      const touch = (c) => {
+        for (const j of near[c]) if (state[j] === 1 && count[j] && !queued[j]) { queued[j] = 1; queue.push(j); }
+      };
+      function reveal(i) {
+        const stack = [i];
+        while (stack.length) {
+          const c = stack.pop();
+          if (state[c]) continue;
+          if (mine[c]) return false;          // unreachable while the rules are sound
+          state[c] = 1; open++;
+          if (count[c] === 0) { for (const j of near[c]) if (!state[j]) stack.push(j); }
+          else if (!queued[c]) { queued[c] = 1; queue.push(c); }
+          touch(c);
+        }
+        return true;
+      }
+      const mark = (i) => { if (!state[i]) { state[i] = 2; marked++; touch(i); } };
+
+      // A constraint: the hidden tiles around an open number, and how many of
+      // them are mines.
+      function constraint(i) {
+        const hidden = [];
+        let need = count[i];
+        for (const j of near[i]) {
+          if (state[j] === 0) hidden.push(j);
+          else if (state[j] === 2) need--;
+        }
+        return { hidden, need };
+      }
+
+      if (!reveal(start)) return false;
+      while (open < safeTotal) {
+        // 1. One number on its own.
+        while (queue.length) {
+          const i = queue.pop();
+          queued[i] = 0;
+          const { hidden, need } = constraint(i);
+          if (!hidden.length) continue;
+          if (need === 0) { for (const j of hidden) if (!reveal(j)) return false; }
+          else if (need === hidden.length) for (const j of hidden) mark(j);
+        }
+        if (open === safeTotal) break;
+
+        // 2. Two overlapping numbers read together. With `both` the shared
+        // hidden tiles, the mines among them are bounded from both sides; what
+        // is left for each number's private tiles may then be all or nothing.
+        const frontier = [], owners = [];
+        for (let i = 0; i < size; i++) {
+          if (state[i] !== 1 || count[i] === 0) continue;
+          const c = constraint(i);
+          if (!c.hidden.length) continue;
+          for (const j of c.hidden) (owners[j] || (owners[j] = [])).push(frontier.length);
+          frontier.push(c);
+        }
+        const partnered = new Int32Array(frontier.length).fill(-1);
+        const safe = [], sure = [];
+        for (let a = 0; a < frontier.length; a++) {
+          const A = frontier[a], partners = [];
+          for (const j of A.hidden) for (const b of owners[j]) if (b > a && partnered[b] !== a) { partnered[b] = a; partners.push(b); }
+          for (const b of partners) {
+            const B = frontier[b];
+            tick++;
+            for (const j of B.hidden) stamp[j] = tick;
+            const both = [], onlyA = [];
+            for (const j of A.hidden) (stamp[j] === tick ? both : onlyA).push(j);
+            tick++;
+            for (const j of both) stamp[j] = tick;
+            const onlyB = B.hidden.filter((j) => stamp[j] !== tick);
+            const most = Math.min(both.length, A.need, B.need);
+            const least = Math.max(0, A.need - onlyA.length, B.need - onlyB.length);
+            for (const [need, only] of [[A.need, onlyA], [B.need, onlyB]]) {
+              if (!only.length) continue;
+              if (need - least === 0) safe.push(...only);
+              else if (need - most === only.length) sure.push(...only);
+            }
+          }
+        }
+        for (const j of sure) mark(j);
+        for (const j of safe) if (!reveal(j)) return false;
+        if (safe.length || sure.length) continue;
+
+        // 3. The mine counter: with every mine found, whatever is still hidden is
+        // safe. Its mirror, every hidden tile a mine, cannot arise here: the loop
+        // only runs while a safe tile is still hidden.
+        if (marked === mines) {
+          for (let i = 0; i < size; i++) if (state[i] === 0 && !reveal(i)) return false;
+          continue;
+        }
+
+        return false;                            // only a guess would go on from here
+      }
+      return true;
+    }
+
+    // Deals `mines` mines around the tile (sx, sy) and its eight neighbours
+    // (only the tile itself on a board too small for the hole), redealing until
+    // solvesByLogic clears it. `random` is Math.random in the game and a seeded
+    // generator in the tests. After `tries` failed deals the last one stands,
+    // guessable, and says so: the measured odds of reaching it are in the test.
+    function layMines(cols, rows, mines, sx, sy, random, tries = 4000) {
+      const size = cols * rows, near = neighbourTable(cols, rows), start = sy * cols + sx;
+      const keep = new Set([start]);
+      for (const j of near[start]) keep.add(j);
+      let pool = [];
+      for (let i = 0; i < size; i++) if (!keep.has(i)) pool.push(i);
+      if (pool.length < mines) { pool = []; for (let i = 0; i < size; i++) if (i !== start) pool.push(i); }
+      const mine = new Uint8Array(size);
+      for (let deal = 1; deal <= tries; deal++) {
+        mine.fill(0);
+        for (let k = 0; k < mines && k < pool.length; k++) {   // partial Fisher-Yates
+          const r = k + Math.floor(random() * (pool.length - k));
+          [pool[k], pool[r]] = [pool[r], pool[k]];
+          mine[pool[k]] = 1;
+        }
+        if (solvesByLogic(cols, rows, mine, start, near)) return { mine, deals: deal, logical: true };
+      }
+      return { mine, deals: tries, logical: false };
+    }
+
+    return { neighbourTable, solvesByLogic, layMines };
+  })();
+  // ---- minefield core end ----
+
+  // Mines are laid after the first tap, around it: a first click that loses the
+  // game is the one thing a player can neither read nor prevent — and neither is
+  // a board that later needs a coin flip, so the deal is one logic can finish.
+  function placeMines(safeX, safeY) {
+    const { mine, logical } = core.layMines(S.cols, S.rows, S.mines, safeX, safeY, Math.random);
+    for (let i = 0; i < S.grid.length; i++) S.grid[i].mine = mine[i] === 1;
+    S.logical = logical;    // false only after 4000 unreadable deals: then say nothing about it
+    numberCells();
+  }
+
+  function numberCells() {
+    for (const cell of S.grid) {
+      if (cell.mine) continue;
+      let n = 0;
+      for (const other of neighbours(cell.x, cell.y)) if (other.mine) n++;
+      cell.n = n;
+    }
+    S.placed = true;
+  }
+
+  function spawnParts(px, py, color, count) {
+    for (let i = 0; i < count; i++) {
+      const a = Math.random() * Math.PI * 2, s = 50 + Math.random() * 180;
+      S.parts.push({ x: px, y: py, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: 0.5 + Math.random() * 0.4, t: 0, color });
+    }
+  }
+
+  // ---- the picture (D-025) ----
+  // An Easy board part-way through: one opening tap, two safe follow-ups, six
+  // flags. Literal, so two photographs match; opened by reveal() and drawn by
+  // draw() like any position a player reaches. `*` is a mine, `F` a flagged one.
+  const POSE_MINES = [
+    '......F..',
+    '......F*.',
+    '.......*.',
+    'F......F.',
+    '...F.....',
+    '........*',
+    '.........',
+    '.*....F..',
+    '..**.....',
+    '.........',
+    '.........',
+  ];
+  const POSE_TAPS = [[2, 1], [2, 4], [1, 4]];
+
+  function posePicture() {
+    newGame(0);
+    POSE_MINES.forEach((row, y) => [...row].forEach((ch, x) => { at(x, y).mine = ch !== '.'; }));
+    numberCells();          // S.placed: reveal() neither lays mines nor starts the clock
+    for (const [x, y] of POSE_TAPS) reveal(x, y);
+    POSE_MINES.forEach((row, y) => [...row].forEach((ch, x) => { if (ch === 'F') toggleFlag(x, y); }));
+    for (const cell of S.grid) cell.t = 1;   // numbers fully faded in
+    S.time = 38;
+    S.best = 84;
+  }
+
+  const cellCenter = (cell) => ({ x: L.x + cell.x * L.cell + L.cell / 2, y: L.y + cell.y * L.cell + L.cell / 2 });
+
+  function reveal(x, y) {
+    const first = at(x, y);
+    if (!first || first.revealed || first.flagged) return;
+    if (!S.placed) {
+      placeMines(x, y);
+      S.runStart = performance.now();
+      S.running = true;
+    }
+    if (first.mine) return lose(first);
+
+    // Iterative flood: a 13x17 board of zeros is 221 frames deep in recursion
+    // on the unlucky board, and that is a crash the player cannot retry past.
+    const stack = [first];
+    let opened = 0;
+    while (stack.length) {
+      const cell = stack.pop();
+      if (cell.revealed || cell.flagged) continue;
+      cell.revealed = true;
+      cell.t = 0;
+      S.revealed++;
+      opened++;
+      if (cell.n === 0) for (const other of neighbours(cell.x, cell.y)) if (!other.revealed && !other.mine) stack.push(other);
+    }
+    if (opened > 0) tone(opened > 6 ? 520 : 380, 0.05, 'triangle', 0.04);
+    checkWin();
+  }
+
+  // Clicking a satisfied number opens the rest of its neighbours. It is the move
+  // that makes a big board playable, and it is where a misplaced flag costs you.
+  function chord(x, y) {
+    const cell = at(x, y);
+    if (!cell || !cell.revealed || cell.n === 0) return;
+    let flagged = 0;
+    for (const other of neighbours(x, y)) if (other.flagged) flagged++;
+    if (flagged !== cell.n) return;
+    for (const other of neighbours(x, y)) {
+      if (!other.flagged && !other.revealed) reveal(other.x, other.y);
+      if (S.mode !== 'playing') return;
+    }
+  }
+
+  function toggleFlag(x, y) {
+    const cell = at(x, y);
+    if (!cell || cell.revealed || S.mode !== 'playing') return;
+    cell.flagged = !cell.flagged;
+    S.flags += cell.flagged ? 1 : -1;
+    tone(cell.flagged ? 700 : 420, 0.05, 'square', 0.04);
+  }
+
+  function lose(mine) {
+    S.mode = 'lost';
+    S.running = false;
+    S.overT = 0;
+    S.shake = 14;
+    S.boom = mine;
+    mine.revealed = true;
+    for (const cell of S.grid) {
+      if (cell.mine && !cell.flagged) cell.revealed = true;
+      if (!cell.mine && cell.flagged) cell.wrong = true;
+    }
+    const c = cellCenter(mine);
+    spawnParts(c.x, c.y, '#f87171', 30);
+    tone(260, 0.16, 'sawtooth', 0.05);
+    tone(170, 0.24, 'sawtooth', 0.05, 0.12);
+    tone(110, 0.32, 'sawtooth', 0.05, 0.26);
+    emit('gameover', { game: 'minesweeper', won: false, time: Math.floor(S.time) });
+  }
+
+  function checkWin() {
+    if (S.revealed < S.grid.length - S.mines) return;
+    S.mode = 'won';
+    S.running = false;
+    S.overT = 0;
+    for (const cell of S.grid) if (cell.mine && !cell.flagged) { cell.flagged = true; S.flags++; }
+    const seconds = Math.max(1, Math.floor(S.time));
+    const key = bestKey(LEVELS[S.level].key);
+    if (S.best === 0 || seconds < S.best) {
+      S.best = seconds;
+      S.newBest = true;
+      storage.set(key, String(seconds));
+    }
+    for (let i = 0; i < 5; i++) {
+      spawnParts(60 + Math.random() * (W - 120), 200 + Math.random() * 260, ['#38bdf8', '#4ade80', '#fbbf24'][i % 3], 14);
+    }
+    [523, 659, 784, 1046].forEach((f, i) => tone(f, 0.16, 'triangle', 0.05, i * 0.09));
+    emit('gameover', { game: 'minesweeper', won: true, time: seconds });
+  }
+
+  // ---- update ----
+  function update(dt) {
+    S.clock += dt;
+    if (S.shake > 0) S.shake = Math.max(0, S.shake - dt * 32);
+    if (S.mode === 'won' || S.mode === 'lost') S.overT += dt;
+    // Wall clock, not a sum of frame deltas. The deltas are clamped to 50 ms
+    // and stop entirely in a hidden tab, so the old clock ran slow exactly when
+    // it mattered — and it is what gets written to the best-time record.
+    if (S.running) S.time = (performance.now() - S.runStart) / 1000;
+    for (const cell of S.grid) if (cell.revealed && cell.t < 1) cell.t = Math.min(1, cell.t + dt * 7);
+    for (let i = S.parts.length - 1; i >= 0; i--) {
+      const p = S.parts[i];
+      p.t += dt;
+      if (p.t >= p.life) { S.parts.splice(i, 1); continue; }
+      p.x += p.vx * dt; p.y += p.vy * dt;
+      p.vx *= 0.95; p.vy = p.vy * 0.95 + 300 * dt;
+    }
+  }
+
+  // ---- drawing ----
+  const view = { scale: 1, ox: 0, oy: 0, dpr: 1, cw: 0, ch: 0 };
+
+  function resize() {
+    invalidate();           // assigning canvas.width below wipes the picture
+    const dpr = Math.min(window.devicePixelRatio || 1, 2.5);
+    const cw = window.innerWidth, ch = window.innerHeight;
+    view.dpr = dpr; view.cw = cw; view.ch = ch;
+    view.scale = Math.min(cw / W, ch / H);
+    view.ox = (cw - W * view.scale) / 2;
+    view.oy = (ch - H * view.scale) / 2;
+    canvas.width = Math.round(cw * dpr);
+    canvas.height = Math.round(ch * dpr);
+  }
+
+  const roundRect = (x, y, w, h, r) => {
+    const rr = Math.min(r, w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + rr, y);
+    ctx.arcTo(x + w, y, x + w, y + h, rr);
+    ctx.arcTo(x + w, y + h, x, y + h, rr);
+    ctx.arcTo(x, y + h, x, y, rr);
+    ctx.arcTo(x, y, x + w, y, rr);
+    ctx.closePath();
+  };
+
+  const clock = (seconds) => {
+    const s = Math.floor(seconds);
+    return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+  };
+
+  function drawFlag(cx, cy, size) {
+    ctx.strokeStyle = '#94a3b8';
+    ctx.lineWidth = Math.max(2, size * 0.07);
+    ctx.beginPath();
+    ctx.moveTo(cx - size * 0.02, cy - size * 0.3);
+    ctx.lineTo(cx - size * 0.02, cy + size * 0.28);
+    ctx.stroke();
+    ctx.fillStyle = '#94a3b8';
+    ctx.fillRect(cx - size * 0.24, cy + size * 0.26, size * 0.48, size * 0.1);
+    ctx.fillStyle = '#ef4444';
+    ctx.beginPath();
+    ctx.moveTo(cx - size * 0.02, cy - size * 0.32);
+    ctx.lineTo(cx + size * 0.3, cy - size * 0.14);
+    ctx.lineTo(cx - size * 0.02, cy + size * 0.04);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  function drawMine(cx, cy, size, color) {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = Math.max(2, size * 0.07);
+    for (let i = 0; i < 4; i++) {
+      const a = (Math.PI / 4) * i;
+      ctx.beginPath();
+      ctx.moveTo(cx - Math.cos(a) * size * 0.34, cy - Math.sin(a) * size * 0.34);
+      ctx.lineTo(cx + Math.cos(a) * size * 0.34, cy + Math.sin(a) * size * 0.34);
+      ctx.stroke();
+    }
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(cx, cy, size * 0.22, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.75)';
+    ctx.beginPath();
+    ctx.arc(cx - size * 0.07, cy - size * 0.08, size * 0.06, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function drawBoard() {
+    ctx.fillStyle = '#0d1428';
+    roundRect(L.x - 8, L.y - 8, L.w + 16, L.h + 16, 14);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(56, 189, 248, 0.18)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    const size = L.cell;
+    const pad = Math.max(1, Math.round(size * 0.05));
+    for (const cell of S.grid) {
+      const x = L.x + cell.x * size, y = L.y + cell.y * size;
+      const cx = x + size / 2, cy = y + size / 2;
+
+      if (!cell.revealed) {
+        ctx.fillStyle = (cell.x + cell.y) % 2 === 0 ? '#243047' : '#1f2a3f';
+        roundRect(x + pad, y + pad, size - pad * 2, size - pad * 2, size * 0.16);
+        ctx.fill();
+        ctx.fillStyle = 'rgba(255,255,255,0.05)';
+        roundRect(x + pad, y + pad, size - pad * 2, (size - pad * 2) * 0.45, size * 0.16);
+        ctx.fill();
+        if (cell.flagged) drawFlag(cx, cy, size);
+        if (cell.wrong) {
+          ctx.strokeStyle = '#ef4444';
+          ctx.lineWidth = Math.max(2, size * 0.06);
+          ctx.beginPath();
+          ctx.moveTo(x + size * 0.25, y + size * 0.25);
+          ctx.lineTo(x + size * 0.75, y + size * 0.75);
+          ctx.moveTo(x + size * 0.75, y + size * 0.25);
+          ctx.lineTo(x + size * 0.25, y + size * 0.75);
+          ctx.stroke();
+        }
+      } else {
+        const k = cell.t;
+        ctx.fillStyle = cell === S.boom ? '#7f1d1d' : '#111a2e';
+        roundRect(x + pad, y + pad, size - pad * 2, size - pad * 2, size * 0.16);
+        ctx.fill();
+        if (cell.mine) {
+          drawMine(cx, cy, size, cell === S.boom ? '#fecaca' : '#f87171');
+        } else if (cell.n > 0) {
+          ctx.globalAlpha = k;
+          ctx.fillStyle = NUM_COLORS[cell.n];
+          ctx.font = `700 ${Math.round(size * 0.52)}px ${FONT}`;
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(String(cell.n), cx, cy + size * 0.02);
+          ctx.globalAlpha = 1;
+        }
+      }
+    }
+
+    if (S.cursorVisible && S.mode === 'playing') {
+      ctx.strokeStyle = '#38bdf8';
+      ctx.lineWidth = 3;
+      roundRect(L.x + S.cursor.x * size + 1, L.y + S.cursor.y * size + 1, size - 2, size - 2, size * 0.18);
+      ctx.stroke();
+    }
+  }
+
+  function chip(x, y, w, h, label, active) {
+    ctx.fillStyle = active ? 'rgba(56, 189, 248, 0.22)' : 'rgba(148, 163, 184, 0.12)';
+    roundRect(x, y, w, h, h / 2);
+    ctx.fill();
+    ctx.strokeStyle = active ? '#38bdf8' : 'rgba(148, 163, 184, 0.35)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.fillStyle = active ? '#e0f2fe' : '#94a3b8';
+    ctx.font = `600 16px ${FONT}`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(label, x + w / 2, y + h / 2);
+  }
+
+  // Hit boxes are built where they are drawn, so a moved button cannot keep an
+  // old, invisible tap target alive somewhere else on the screen.
+  const hits = [];
+  const hitBox = (id, x, y, w, h) => { hits.push({ id, x, y, w, h }); };
+  const hitAt = (x, y) => hits.find((b) => x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h);
+
+  function drawHud() {
+    hits.length = 0;
+    ctx.textBaseline = 'middle';
+
+    ctx.textAlign = 'left';
+    ctx.font = `600 13px ${FONT}`;
+    ctx.fillStyle = '#7dd3fc';
+    ctx.fillText('MINES', 20, 22);
+    ctx.font = `700 24px ${FONT}`;
+    ctx.fillStyle = '#e2e8f0';
+    // Classic minesweeper goes negative on purpose: clamping at zero tells a
+    // player who over-flagged that the board is solved when it is not.
+    ctx.fillText(String(S.mines - S.flags), 20, 45);
+
+    ctx.textAlign = 'center';
+    ctx.font = `600 13px ${FONT}`;
+    ctx.fillStyle = '#7dd3fc';
+    ctx.fillText('TIME', W / 2, 22);
+    ctx.font = `700 24px ${FONT}`;
+    ctx.fillStyle = '#e2e8f0';
+    ctx.fillText(clock(S.time), W / 2, 45);
+
+    ctx.textAlign = 'right';
+    ctx.font = `600 13px ${FONT}`;
+    ctx.fillStyle = '#7dd3fc';
+    ctx.fillText('BEST', W - 20, 22);
+    ctx.font = `700 24px ${FONT}`;
+    ctx.fillStyle = S.newBest ? '#fbbf24' : '#e2e8f0';
+    ctx.fillText(S.best > 0 ? clock(S.best) : '—', W - 20, 45);
+
+    // Flag mode is the whole mobile story: without a visible toggle the only way
+    // to flag is a long press nobody discovers.
+    const fw = 104, fh = 30, fx = W / 2 - fw / 2, fy = H - 44;
+    chip(fx, fy, fw, fh, S.flagMode ? '⚑ Flagging' : '⚑ Flag off', S.flagMode);
+    hitBox('flagmode', fx - 10, fy - 8, fw + 20, fh + 16);
+
+    const rw = 86, rh = 30;
+    chip(18, fy, rw, rh, 'Restart', false);
+    hitBox('restart', 12, fy - 8, rw + 12, rh + 16);
+
+    const level = LEVELS[S.level];
+    chip(W - 18 - 96, fy, 96, rh, level.name, false);
+    hitBox('level', W - 18 - 102, fy - 8, 108, rh + 16);
+  }
+
+  function drawOverlay(title, lines, accent) {
+    ctx.fillStyle = 'rgba(11, 16, 32, 0.86)';
+    ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = accent;
+    ctx.font = `800 46px ${FONT}`;
+    ctx.fillText(title, W / 2, 170);
+    ctx.font = `500 18px ${FONT}`;
+    lines.forEach((line, i) => {
+      ctx.fillStyle = i === 0 ? '#e2e8f0' : 'rgba(203, 213, 225, 0.72)';
+      ctx.fillText(line, W / 2, 224 + i * 30);
+    });
+  }
+
+  function drawLevelChips(y) {
+    const w = 140, h = 44, gap = 12;
+    const totalW = LEVELS.length * w + (LEVELS.length - 1) * gap;
+    let x = (W - totalW) / 2;
+    for (let i = 0; i < LEVELS.length; i++) {
+      const level = LEVELS[i];
+      chip(x, y, w, h, `${level.name} · ${level.mines}`, i === S.level);
+      hitBox(`level:${i}`, x, y, w, h);
+      x += w + gap;
+    }
+  }
+
+  function draw() {
+    ctx.setTransform(view.dpr, 0, 0, view.dpr, 0, 0);
+    ctx.fillStyle = '#0b1020';
+    ctx.fillRect(0, 0, view.cw, view.ch);
+
+    ctx.save();
+    ctx.translate(view.ox, view.oy);
+    ctx.scale(view.scale, view.scale);
+    if (S.shake > 0) ctx.translate((Math.random() - 0.5) * S.shake, (Math.random() - 0.5) * S.shake);
+
+    if (S.mode !== 'title') {
+      drawBoard();
+      drawHud();
+    }
+
+    for (const p of S.parts) {
+      ctx.globalAlpha = 1 - p.t / p.life;
+      ctx.fillStyle = p.color;
+      ctx.fillRect(p.x - 3, p.y - 3, 6, 6);
+    }
+    ctx.globalAlpha = 1;
+
+    if (S.mode === 'title') {
+      hits.length = 0;
+      drawOverlay('MINESWEEPER', [
+        'Numbers count the mines they touch.',
+        'Every board can be cleared by logic — no guesses.',
+        'Tap to clear · long-press or right-click to flag.',
+        'Arrow keys move, Space clears, F flags, C chords.',
+      ], '#38bdf8');
+      drawLevelChips(360);
+      ctx.fillStyle = 'rgba(203, 213, 225, 0.8)';
+      ctx.font = `600 19px ${FONT}`;
+      ctx.textAlign = 'center';
+      ctx.fillText('Pick a size, or tap anywhere to play', W / 2, 470);
+      const best = S.best;
+      if (best > 0) {
+        ctx.fillStyle = '#fbbf24';
+        ctx.font = `700 20px ${FONT}`;
+        ctx.fillText(`Best ${LEVELS[S.level].name}: ${clock(best)}`, W / 2, 520);
+      }
+    } else if (S.mode === 'won') {
+      // The overlay hides the HUD, so the HUD's tap targets have to go with it:
+      // they were still first in `hits`, and a tap on "play again" silently
+      // toggled the invisible flag switch underneath instead.
+      hits.length = 0;
+      drawOverlay('CLEARED', [
+        `${LEVELS[S.level].name} · ${clock(S.time)}`,
+        S.newBest ? 'New best time!' : `Best ${clock(S.best)}`,
+        '',
+        S.overT > 0.6 ? 'Tap or press R to play again' : '',
+      ], '#4ade80');
+      drawLevelChips(430);
+    } else if (S.mode === 'lost') {
+      hits.length = 0;
+      drawOverlay('BOOM', [
+        `${LEVELS[S.level].name} · ${clock(S.time)}`,
+        S.logical ? 'No guess was needed: the numbers held the answer.' : 'The first tap is always safe — the rest are on you.',
+        '',
+        S.overT > 0.6 ? 'Tap or press R to try again' : '',
+      ], '#f87171');
+      drawLevelChips(430);
+    }
+
+    ctx.restore();
+    if (PICTURE) window.__arkaiPosed = true;   // the generator waits for this frame
+  }
+
+  // ---- input ----
+  const toLogical = (clientX, clientY) => {
+    const rect = canvas.getBoundingClientRect();
+    // rect is the CSS box of a canvas stretched to the viewport; the game is
+    // letterboxed inside it by `view`, so undo the same transform, not a guess.
+    const px = (clientX - rect.left) * (view.cw / rect.width || 1);
+    const py = (clientY - rect.top) * (view.ch / rect.height || 1);
+    return { x: (px - view.ox) / view.scale, y: (py - view.oy) / view.scale };
+  };
+
+  const cellAt = (lx, ly) => {
+    if (lx < L.x || ly < L.y || lx >= L.x + L.w || ly >= L.y + L.h) return null;
+    return { x: Math.floor((lx - L.x) / L.cell), y: Math.floor((ly - L.y) / L.cell) };
+  };
+
+  function restart() {
+    newGame(S.level);
+    ensureAudio();
+    if (audio && audio.state === 'suspended') audio.resume().catch(() => {});
+  }
+
+  let press = null;
+  let longTimer = 0;
+
+  canvas.addEventListener('pointerdown', (e) => {
+    invalidate();
+    canvas.focus();
+    ensureAudio();
+    if (audio && audio.state === 'suspended') audio.resume().catch(() => {});
+    // One finger at a time. A second touch used to overwrite `press` while the
+    // first touch's long-press timer stayed armed: 340 ms later it read the new
+    // coordinates and dropped a flag under a finger that had already lifted.
+    if (press) return;
+    window.clearTimeout(longTimer);
+    // Without capture, a button released outside the iframe never delivers
+    // pointerup here and the press stays armed.
+    try { canvas.setPointerCapture(e.pointerId); } catch { /* not capturable */ }
+    const p = toLogical(e.clientX, e.clientY);
+    press = { id: e.pointerId, x: e.clientX, y: e.clientY, lx: p.x, ly: p.y, button: e.button, done: false };
+
+    // Right button is an immediate flag; touch has to wait to see if it is a hold.
+    // Off the board it is nothing at all: on the title or the end screen its release
+    // used to count as a tap and start a new game.
+    if (e.button === 2) {
+      if (S.mode === 'playing') {
+        const cell = cellAt(p.x, p.y);
+        if (cell) toggleFlag(cell.x, cell.y);
+      }
+      press.done = true;
+      return;
+    }
+    if (S.mode === 'playing') {
+      longTimer = window.setTimeout(() => {
+        invalidate();
+        if (!press || press.done) return;
+        const cell = cellAt(press.lx, press.ly);
+        // cellAt() only resolves coordinates; the revealed flag lives on the
+        // grid cell from at(). A hold over an already-revealed cell flags
+        // nothing (toggleFlag's own guard below no-ops on it too) — leave
+        // `done` false so release still reaches the chord/reveal path below,
+        // instead of being swallowed.
+        const target = cell && at(cell.x, cell.y);
+        if (target && !target.revealed) {
+          toggleFlag(cell.x, cell.y);
+          press.done = true;
+        }
+      }, LONG_PRESS);
+    }
+  });
+
+  // A move only arms or cancels the press; nothing drawn depends on it, so it does
+  // not repaint (a mouse wandering over a still board would redraw it every frame).
+  canvas.addEventListener('pointermove', (e) => {
+    if (!press || e.pointerId !== press.id) return;
+    if (Math.abs(e.clientX - press.x) > DRAG_SLOP || Math.abs(e.clientY - press.y) > DRAG_SLOP) {
+      window.clearTimeout(longTimer);
+      press.done = true;
+    }
+  });
+
+  canvas.addEventListener('pointerup', (e) => {
+    invalidate();
+    if (!press || e.pointerId !== press.id) return;
+    window.clearTimeout(longTimer);
+    const wasHandled = press.done;
+    // The cell under the finger that went *down*, not the one it drifted onto:
+    // DRAG_SLOP allows 12 CSS px of wobble, which on a phone is more than half
+    // a cell on Hard — enough to open a neighbour and lose a game the player
+    // never played. The long press already used the press point; so does this.
+    const p = { x: press.lx, y: press.ly };
+    press = null;
+    if (wasHandled) return;
+
+    const box = hitAt(p.x, p.y);
+    if (box) {
+      if (box.id === 'flagmode') { S.flagMode = !S.flagMode; tone(600, 0.05, 'square', 0.04); return; }
+      if (box.id === 'restart') return restart();
+      if (box.id === 'level') { S.mode = 'title'; return; }
+      if (box.id.startsWith('level:')) return newGame(Number(box.id.slice(6)));
+    }
+
+    if (S.mode === 'title') return restart();
+    if (S.mode === 'won' || S.mode === 'lost') {
+      if (S.overT > 0.6) restart();
+      return;
+    }
+
+    const cell = cellAt(p.x, p.y);
+    if (!cell) return;
+    const target = at(cell.x, cell.y);
+    if (S.flagMode) return toggleFlag(cell.x, cell.y);
+    if (target && target.revealed) return chord(cell.x, cell.y);
+    reveal(cell.x, cell.y);
+  });
+
+  canvas.addEventListener('pointercancel', (e) => {
+    invalidate();
+    if (press && e.pointerId !== press.id) return;
+    window.clearTimeout(longTimer);
+    press = null;
+  });
+  canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+  window.addEventListener('keydown', (e) => {
+    invalidate();
+    // Ctrl+F, Cmd+C, Ctrl+R belong to the browser: without this, looking for text on
+    // the page planted a flag, and copying opened the cells around the cursor.
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    const move = { ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0] }[e.code];
+    if (move) {
+      e.preventDefault();
+      if (S.mode === 'title') restart();
+      S.cursorVisible = true;
+      S.cursor.x = Math.min(S.cols - 1, Math.max(0, S.cursor.x + move[0]));
+      S.cursor.y = Math.min(S.rows - 1, Math.max(0, S.cursor.y + move[1]));
+      return;
+    }
+    if (e.code === 'Space' || e.code === 'Enter') {
+      e.preventDefault();
+      if (S.mode === 'title') return restart();
+      if ((S.mode === 'won' || S.mode === 'lost') && S.overT > 0.6) return restart();
+      if (S.mode !== 'playing') return;
+      S.cursorVisible = true;
+      const target = at(S.cursor.x, S.cursor.y);
+      if (target && target.revealed) chord(S.cursor.x, S.cursor.y);
+      else reveal(S.cursor.x, S.cursor.y);
+      return;
+    }
+    if (e.code === 'KeyF') {
+      e.preventDefault();
+      if (S.mode !== 'playing') return;
+      S.cursorVisible = true;
+      toggleFlag(S.cursor.x, S.cursor.y);
+      return;
+    }
+    if (e.code === 'KeyC') {
+      if (S.mode === 'playing') { S.cursorVisible = true; chord(S.cursor.x, S.cursor.y); }
+      return;
+    }
+    if (e.code === 'KeyR') { restart(); return; }
+    if (e.code === 'Digit1') return newGame(0);
+    if (e.code === 'Digit2') return newGame(1);
+    if (e.code === 'Digit3') return newGame(2);
+    if (e.code === 'KeyM') {
+      S.muted = !S.muted;
+      storage.set(STORE_MUTE, S.muted ? '1' : '0');
+      if (!S.muted) { ensureAudio(); tone(660, 0.07, 'triangle', 0.05); }
+    }
+  });
+
+  window.addEventListener('resize', resize);
+  window.addEventListener('orientationchange', resize);
+  // The two ways a picture can go without the game changing: a tab brought back,
+  // and a canvas whose backing store the browser dropped and has now restored blank.
+  document.addEventListener('visibilitychange', invalidate);
+  canvas.addEventListener('contextrestored', invalidate);
+
+  const animating = () => {
+    if (S.shake > 0 || S.parts.length > 0) return true;
+    if ((S.mode === 'won' || S.mode === 'lost') && S.overT < 0.8) return true;   // "tap to play again" lands at 0.6
+    for (const cell of S.grid) if (cell.revealed && cell.t < 1) return true;
+    return false;
+  };
+
+  let last = 0;
+  function frame(now) {
+    // Booked before anything that can throw: one bad frame must not stop every frame
+    // after it and leave the game frozen on its last picture (Pair Flip, 48ad915).
+    requestAnimationFrame(frame);
+    if (!last) last = now;
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    if (!PICTURE) update(dt);   // a pose stands still
+    const second = Math.floor(S.time);
+    if (second !== shownSecond) { shownSecond = second; dirty = true; }
+    const live = animating();
+    // `wasAnimating` buys one more frame after the last one ends, so the screen
+    // never keeps a half-finished animation as its final picture.
+    if (dirty || live || wasAnimating) {
+      dirty = false;
+      draw();
+    }
+    wasAnimating = live;
+  }
+
+  S.cols = LEVELS[S.level].cols;
+  S.rows = LEVELS[S.level].rows;
+  S.mines = LEVELS[S.level].mines;
+  S.best = Number(storage.get(bestKey(LEVELS[S.level].key))) || 0;
+  layout();
+  if (PICTURE) posePicture();
+  resize();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
