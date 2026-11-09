@@ -1,0 +1,39 @@
+# Files Cloudflare should not publish. Same syntax as .gitignore.
+.git
+.github
+.wrangler
+node_modules
+/worker
+/scripts
+/wrangler.jsonc
+/README.md
+/dockerfile
+/.dockerignore
+/.whitesource
+/.gitignore
+/.nojekyll
+
+# --- files over 25 MiB (written by scripts/big-files.mjs) ---
+/play/10-minutes-till-dawn/Build/10MinutesTillDawnWebGL.data.unityweb
+/play/baldis-basics/unity/baldi.data.unityweb
+/play/biters-io/biters.io-v1.3.asm.code.unityweb
+/play/boxing-physics/WebGLBoxingPhysics.js
+/play/cyber-city-driver/CityCarStunt3-Punk\ Versiyon.data.unityweb
+/play/driftking/drift.data.unityweb
+/play/ducklife4/Build/WebGL4.data.unityweb
+/play/ferge/113c7e0af1a79694fab3c4dc79d92f7e.data.gz
+/play/fliphero/July\ 31\ 2019.asm.code\ -\ Copy.unityweb
+/play/fliphero/July\ 31\ 2019.asm.code.unityweb
+/play/fnaf/project.zip
+/play/fnaf2/project.zip
+/play/fnaf3/project.zip
+/play/funnyshooter/FunnyShooter2_Yandex.data.unityweb
+/play/picky-package/f2c72720ba16fa5932f2b34e35939282.unityweb
+/play/station-meltdown/WebGL.data.gz
+/play/subwaysurfersbeijing/Beijing_2.data.unityweb
+/play/subwaysurfersbeijing/Beijing_2.wasm.code.unityweb
+/play/subwaysurfersbeijing/Subway-Surfer-Beijing.zip
+/play/subwaysurfersmonaco/Monaco.data.unityweb
+/play/subwaysurferssanfrancisco/062497be
+/play/subwaysurferssanfrancisco/Build/SanFrancisco/SanFrancisco.data.unityweb
+/play/subwaysurferssanfrancisco/uv.zip
