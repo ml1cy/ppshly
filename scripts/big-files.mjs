@@ -38,8 +38,41 @@ const head = readFileSync(ignorePath, "utf8").split(MARK)[0].trimEnd();
 writeFileSync(ignorePath, `${head}\n\n${MARK}\n${files.map(escape).join("\n")}\n`);
 console.log(`${files.length} files over 25 MiB listed in .assetsignore`);
 
+// Keys already in the bucket with the same size, so a redeploy does not send
+// 800+ MB again. Needs CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID in the
+// environment (set in CI); without them every file is uploaded.
+async function existingObjects() {
+  const token = process.env.CLOUDFLARE_API_TOKEN;
+  const account = process.env.CLOUDFLARE_ACCOUNT_ID;
+  if (!token || !account) return null;
+  const seen = new Map();
+  let cursor = "";
+  try {
+    do {
+      const url = new URL(`https://api.cloudflare.com/client/v4/accounts/${account}/r2/buckets/${BUCKET}/objects`);
+      url.searchParams.set("per_page", "1000");
+      if (cursor) url.searchParams.set("cursor", cursor);
+      const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+      const body = await res.json();
+      if (!body.success) throw new Error(JSON.stringify(body.errors));
+      for (const o of body.result) seen.set(o.key, o.size);
+      cursor = body.result_info?.is_truncated ? body.result_info.cursor : "";
+    } while (cursor);
+    return seen;
+  } catch (err) {
+    console.warn(`Could not list the bucket (${err.message}); uploading every large file.`);
+    return null;
+  }
+}
+
 if (process.argv.includes("--upload")) {
+  const have = await existingObjects();
   for (const [n, file] of files.entries()) {
+    const size = statSync(join(ROOT, file)).size;
+    if (have && have.get(file) === size) {
+      console.log(`[${n + 1}/${files.length}] ${file} (already in R2)`);
+      continue;
+    }
     console.log(`[${n + 1}/${files.length}] ${file}`);
     const run = spawnSync(
       "npx",
